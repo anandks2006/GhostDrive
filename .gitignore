@@ -1,0 +1,94 @@
+# ─── Credentials & secrets ────────────────────────────────────────────────────
+# NEVER commit these to git. They contain your API keys, phone number,
+# and Telegram session tokens.
+
+# Telegram MTProto session files
+*.session
+*.session-journal
+ghostdrive_test.session
+ghostdrive_integration.session
+
+# Credential files (filled in locally, never committed)
+telegram_credentials.py
+
+# GhostDrive keystore (contains your encrypted Master Key)
+keystore.json
+nonce_counter.json
+
+# Config files that may hold credentials
+config.ini
+config.json
+secrets.json
+.env
+.env.*
+credentials.json
+
+# ─── Telegram index / test artifacts ─────────────────────────────────────────
+telegram_index.json
+integration_index_*.json
+ghosdrive_test_input.bin
+ghosdrive_test_output.bin
+ghosdrive_integration_*.bin
+
+# Integration test nonce counter storage
+.integration_test_data/
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Poetry
+poetry.lock        # Uncomment this line to NOT commit lockfile (not recommended)
+# Egg / dist
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ─── Testing & coverage ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# ─── IDE / Editor ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.suo
+*.user
+.DS_Store
+Thumbs.db
+
+# ─── OS artifacts ─────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.temp
+*.bak
+
+# ─── PyInstaller ──────────────────────────────────────────────────────────────
+*.spec
+dist/
+build/
+*.exe
+
+# ─── Database files (local only) ─────────────────────────────────────────────
+ghostdrive.db
+ghostdrive.db-shm
+ghostdrive.db-wal
+ghostdrive_search.fts
+ghostdrive_search.fts-shm
+ghostdrive_search.fts-wal

@@ -1,0 +1,1 @@
+"""GhostDrive crypto sub-package."""
