@@ -11,6 +11,10 @@ ghostdrive_integration.session
 # Credential files (filled in locally, never committed)
 telegram_credentials.py
 
+# Project spec document (internal reference only -- not for public release)
+GhostDrive_ProjectSpec_v1.2.txt
+GhostDrive_ProjectSpec_*.txt
+
 # GhostDrive keystore (contains your encrypted Master Key)
 keystore.json
 nonce_counter.json
