@@ -59,10 +59,13 @@ build-backend = "poetry.core.masonry.api"
 asyncio_mode = "auto"
 testpaths    = ["tests"]
 addopts      = "-v --tb=short"
+markers      = [
+    "integration: live network tests requiring real credentials (deselect with -m 'not integration')",
+]
 
 [tool.coverage.run]
 source  = ["ghostdrive"]
-omit    = ["ghostdrive/gui/*", "ghostdrive/cli/*"]
+omit    = ["ghostdrive/gui/*", "ghostdrive/cli/*", "ghostdrive/backends/*"]
 
 [tool.coverage.report]
 show_missing = true

@@ -10,6 +10,10 @@ ghostdrive_integration.session
 
 # Credential files (filled in locally, never committed)
 telegram_credentials.py
+discord_credentials.py
+
+# PoC / scratch files that contain credentials or are superseded by the real backend
+discord_test.py
 
 # Project spec document (internal reference only -- not for public release)
 GhostDrive_ProjectSpec_v1.2.txt
@@ -27,15 +31,21 @@ secrets.json
 .env.*
 credentials.json
 
-# ─── Telegram index / test artifacts ─────────────────────────────────────────
+# ─── Backend test artifacts ──────────────────────────────────────────────────
 telegram_index.json
+discord_index.json
 integration_index_*.json
+ghostdrive_*_test_input.bin
+ghostdrive_*_test_output.bin
+ghostdrive_discord_test_*.bin
 ghosdrive_test_input.bin
 ghosdrive_test_output.bin
 ghosdrive_integration_*.bin
 
 # Integration test nonce counter storage
 .integration_test_data/
+.integration_backends_nonces/
+.integration_backends_test.db*
 
 # ─── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
