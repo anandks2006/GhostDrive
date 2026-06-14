@@ -116,9 +116,4 @@ class QuotaManager:
         Returns:
             Available bytes. 0 if backend not found.
         """
-        row = self._db._conn.execute(
-            """SELECT quota_limit - quota_used - quota_reserved AS available
-               FROM backends WHERE id = ?""",
-            (backend_id,),
-        ).fetchone()
-        return row["available"] if row and row["available"] > 0 else 0
+        return self._db.get_backend_available_space(backend_id)

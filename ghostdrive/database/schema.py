@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS files (
     version_of    TEXT REFERENCES files(id),-- NULL for first version
     tombstone     INTEGER NOT NULL DEFAULT 0,  -- 0|1 bool
     tombstone_at  TEXT,                     -- ISO-8601, NULL if not tombstoned
-    logical_clock INTEGER NOT NULL DEFAULT 0
+    logical_clock INTEGER NOT NULL DEFAULT 0,
+    thumbnail_blob BLOB
 ) STRICT;
 """
 
@@ -179,10 +180,10 @@ CREATE INDEX IF NOT EXISTS idx_upload_hist_ts     ON upload_history(timestamp);
 
 CREATE_HMAC_LEDGER = """
 CREATE TABLE IF NOT EXISTS hmac_ledger (
-    id          INTEGER PRIMARY KEY CHECK(id = 1),  -- singleton row
-    last_hmac   TEXT NOT NULL,          -- hex HMAC-SHA512 of last committed row
-    row_count   INTEGER NOT NULL DEFAULT 0,
-    updated_at  TEXT NOT NULL           -- ISO-8601
+    id            INTEGER PRIMARY KEY CHECK(id = 1),  -- singleton row
+    last_hmac     TEXT NOT NULL,          -- hex HMAC-SHA512 of last committed row
+    logical_clock INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT NOT NULL           -- ISO-8601
 ) STRICT;
 """
 
@@ -219,7 +220,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
 
 # ─── Schema version (for future migrations) ───────────────────────────────────
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 CREATE_SCHEMA_VERSION = """
 CREATE TABLE IF NOT EXISTS schema_version (

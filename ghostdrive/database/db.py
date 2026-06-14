@@ -118,8 +118,8 @@ class GhostDriveDB:
         ledger_key: bytes,
         genesis_seed: bytes,
     ) -> None:
-        if len(ledger_key) != 32:
-            raise ValueError(f"ledger_key must be 32 bytes, got {len(ledger_key)}")
+        if len(ledger_key) not in (32, 64):
+            raise ValueError(f"ledger_key must be 32 or 64 bytes, got {len(ledger_key)}")
         if len(genesis_seed) != 32:
             raise ValueError(f"genesis_seed must be 32 bytes, got {len(genesis_seed)}")
 
@@ -194,9 +194,9 @@ class GhostDriveDB:
         """Return the current Lamport clock value (does NOT increment)."""
         self._assert_open()
         row = self._conn.execute(
-            "SELECT row_count FROM hmac_ledger WHERE id = 1"
+            "SELECT logical_clock FROM hmac_ledger WHERE id = 1"
         ).fetchone()
-        return row["row_count"] if row else 0
+        return row["logical_clock"] if row else 0
 
     def _increment_clock(self) -> int:
         """
@@ -205,13 +205,13 @@ class GhostDriveDB:
         Returns the new clock value.
         """
         self._conn.execute(
-            "UPDATE hmac_ledger SET row_count = row_count + 1, updated_at = ? WHERE id = 1",
+            "UPDATE hmac_ledger SET logical_clock = logical_clock + 1, updated_at = ? WHERE id = 1",
             (_now_iso(),),
         )
         row = self._conn.execute(
-            "SELECT row_count FROM hmac_ledger WHERE id = 1"
+            "SELECT logical_clock FROM hmac_ledger WHERE id = 1"
         ).fetchone()
-        return row["row_count"]
+        return row["logical_clock"]
 
     # ── HMAC ledger ───────────────────────────────────────────────────────────
 
@@ -260,7 +260,7 @@ class GhostDriveDB:
         # integrity daemon is built. For now, we verify the ledger singleton
         # is self-consistent.
         row = self._conn.execute(
-            "SELECT last_hmac, row_count FROM hmac_ledger WHERE id = 1"
+            "SELECT last_hmac, logical_clock FROM hmac_ledger WHERE id = 1"
         ).fetchone()
         if row is None:
             raise HMACChainError("HMAC ledger is missing -- database may be corrupted.")
@@ -305,19 +305,33 @@ class GhostDriveDB:
             New logical_clock value.
         """
         clock = self._increment_clock()
-        record = {**record, "logical_clock": clock}
+        record = {
+            **record,
+            "logical_clock": clock,
+            "thumbnail_blob": record.get("thumbnail_blob"),
+        }
 
         self._conn.execute(
             """INSERT INTO files
                (id, name, path, size, mime_type, tier, created_at, modified_at,
-                version, version_of, tombstone, tombstone_at, logical_clock)
+                version, version_of, tombstone, tombstone_at, logical_clock, thumbnail_blob)
                VALUES
                (:id, :name, :path, :size, :mime_type, :tier, :created_at, :modified_at,
-                :version, :version_of, :tombstone, :tombstone_at, :logical_clock)""",
+                :version, :version_of, :tombstone, :tombstone_at, :logical_clock, :thumbnail_blob)""",
             record,
         )
-        self._chain_hmac("files", record)
+        # Exclude blob from HMAC verification record since JSON cannot serialize bytes
+        hmac_record = {k: v for k, v in record.items() if k != "thumbnail_blob"}
+        self._chain_hmac("files", hmac_record)
         return clock
+
+    def update_file_thumbnail(self, file_id: str, blob: bytes) -> None:
+        """Update the thumbnail blob of a file. Caller must be in transaction()."""
+        self._assert_open()
+        self._conn.execute(
+            "UPDATE files SET thumbnail_blob = ? WHERE id = ?",
+            (blob, file_id),
+        )
 
     def tombstone_file(self, file_id: str) -> None:
         """
@@ -334,6 +348,60 @@ class GhostDriveDB:
             (now, clock, file_id),
         )
         self._chain_hmac("files", {"op": "tombstone", "id": file_id, "at": now})
+
+    def restore_file(self, file_id: str) -> None:
+        """
+        Restore a tombstoned file (un-tombstone).
+        Caller must be inside a transaction().
+        """
+        clock = self._increment_clock()
+        self._conn.execute(
+            """UPDATE files
+               SET tombstone = 0, tombstone_at = NULL, logical_clock = ?
+               WHERE id = ?""",
+            (clock, file_id),
+        )
+        self._chain_hmac("files", {"op": "restore", "id": file_id})
+
+    def purge_file_permanently(self, file_id: str) -> None:
+        """
+        Permanently delete a file from the index.
+        Chunks are only deleted from the index (and backend) when ref_count reaches 0.
+        Caller must be inside a transaction().
+        """
+        self._increment_clock()
+
+        chunks = self._conn.execute(
+            "SELECT id FROM chunks WHERE file_id = ?", (file_id,)
+        ).fetchall()
+
+        for c in chunks:
+            cid = c["id"]
+            new_ref_count = self.decrement_ref_count(cid)
+
+            if new_ref_count == 0:
+                # No other files reference this chunk — safe to delete locations and chunk
+                self._conn.execute(
+                    "DELETE FROM chunk_locations WHERE chunk_id = ?", (cid,)
+                )
+                self._chain_hmac("chunk_locations", {"op": "delete", "chunk_id": cid})
+
+                self._conn.execute("DELETE FROM chunks WHERE id = ?", (cid,))
+                self._chain_hmac("chunks", {"op": "delete", "id": cid})
+            else:
+                # Re-associate the shared chunk with another active file to satisfy the foreign key constraint
+                other_file = self._conn.execute(
+                    "SELECT id FROM files WHERE id != ?", (file_id,)
+                ).fetchone()
+                if other_file:
+                    self._conn.execute(
+                        "UPDATE chunks SET file_id = ? WHERE id = ?",
+                        (other_file["id"], cid)
+                    )
+            # If ref_count > 0, chunk_locations and chunk row are preserved for other files
+
+        self._conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        self._chain_hmac("files", {"op": "purge", "id": file_id})
 
     # ── Chunk operations ──────────────────────────────────────────────────────
 
@@ -361,6 +429,19 @@ class GhostDriveDB:
         return self._conn.execute(
             "SELECT * FROM chunks WHERE blake3_hash = ? AND size = ?",
             (blake3_hash, size),
+        ).fetchone()
+
+    def find_chunk_by_file_and_index(
+        self, file_id: str, chunk_index: int
+    ) -> Optional[sqlite3.Row]:
+        """
+        Look up an existing chunk by file_id and chunk_index.
+        Returns the chunk row or None if not found.
+        """
+        self._assert_open()
+        return self._conn.execute(
+            "SELECT * FROM chunks WHERE file_id = ? AND chunk_index = ?",
+            (file_id, chunk_index),
         ).fetchone()
 
     def increment_ref_count(self, chunk_id: str) -> None:
@@ -400,6 +481,36 @@ class GhostDriveDB:
                VALUES
                (:chunk_id, :sub_block_index, :backend_id, :reference_id, :url_type,
                 :upload_date, :last_verified, :status, :quota_reserved)""",
+            record,
+        )
+        self._chain_hmac("chunk_locations", record)
+
+    def find_chunk_location(
+        self, chunk_id: str, sub_block_index: int, backend_id: str
+    ) -> Optional[sqlite3.Row]:
+        """
+        Look up a specific chunk location record.
+        Returns the row or None if not found.
+        """
+        self._assert_open()
+        return self._conn.execute(
+            """SELECT * FROM chunk_locations
+               WHERE chunk_id = ? AND sub_block_index = ? AND backend_id = ?""",
+            (chunk_id, sub_block_index, backend_id),
+        ).fetchone()
+
+    def update_chunk_location_pending(self, record: dict) -> None:
+        """
+        Update an existing chunk location record back to pending status.
+        Caller must be inside a transaction().
+        """
+        record = {**record, "status": "pending"}
+        self._conn.execute(
+            """UPDATE chunk_locations
+               SET reference_id = :reference_id, url_type = :url_type,
+                   upload_date = :upload_date, last_verified = :last_verified,
+                   status = :status, quota_reserved = :quota_reserved
+               WHERE chunk_id = :chunk_id AND sub_block_index = :sub_block_index AND backend_id = :backend_id""",
             record,
         )
         self._chain_hmac("chunk_locations", record)
@@ -499,6 +610,19 @@ class GhostDriveDB:
             (bytes_reserved, backend_id),
         )
 
+    def get_backend_available_space(self, backend_id: str) -> int:
+        """
+        Return available free bytes on a backend (quota_limit - quota_used - quota_reserved).
+        Read-only -- no transaction required.
+        """
+        self._assert_open()
+        row = self._conn.execute(
+            """SELECT quota_limit - quota_used - quota_reserved AS available
+               FROM backends WHERE id = ?""",
+            (backend_id,),
+        ).fetchone()
+        return row["available"] if row and row["available"] > 0 else 0
+
     # ── integrity_log pruning (spec §8.7) ─────────────────────────────────────
 
     def prune_integrity_log(self, chunk_id: str, keep: int = 10) -> int:
@@ -550,11 +674,29 @@ class GhostDriveDB:
             current = row["version"] if row else 0
 
             if current < SCHEMA_VERSION:
+                if current == 1:
+                    try:
+                        self._conn.execute("ALTER TABLE files ADD COLUMN thumbnail_blob BLOB")
+                        logger.info("Database migration: Added thumbnail_blob column to files table.")
+                    except sqlite3.OperationalError as e:
+                        if "duplicate column name" not in str(e).lower():
+                            raise
+                    current = 2
+
+                if current == 2:
+                    try:
+                        self._conn.execute("ALTER TABLE hmac_ledger RENAME COLUMN row_count TO logical_clock")
+                        logger.info("Database migration: Renamed row_count to logical_clock in hmac_ledger.")
+                    except sqlite3.OperationalError as e:
+                        if "no such column" not in str(e).lower():
+                            raise
+                    current = 3
+
                 for ddl in ALL_DDL:
                     stmt = ddl.strip()
                     if stmt:
                         self._conn.execute(stmt)
-                if current == 0:
+                if row is None:
                     self._conn.execute(
                         "INSERT INTO schema_version (version) VALUES (?)",
                         (SCHEMA_VERSION,),
@@ -564,7 +706,7 @@ class GhostDriveDB:
                         "UPDATE schema_version SET version = ?",
                         (SCHEMA_VERSION,),
                     )
-                logger.info("Schema migrated: v%d -> v%d", current, SCHEMA_VERSION)
+                logger.info("Schema migrated: v%d -> v%d", row["version"] if row else 0, SCHEMA_VERSION)
 
             self._conn.execute("COMMIT")
         except Exception:
@@ -589,7 +731,7 @@ class GhostDriveDB:
             self._conn.execute("BEGIN")
             try:
                 self._conn.execute(
-                    """INSERT INTO hmac_ledger (id, last_hmac, row_count, updated_at)
+                    """INSERT INTO hmac_ledger (id, last_hmac, logical_clock, updated_at)
                        VALUES (1, ?, 0, ?)""",
                     (genesis_mac, _now_iso()),
                 )

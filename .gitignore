@@ -106,3 +106,7 @@ ghostdrive.db-wal
 ghostdrive_search.fts
 ghostdrive_search.fts-shm
 ghostdrive_search.fts-wal
+
+# ─── Scratch files ─────────────────────────────────────────────────────────────
+scratch_*.py
+*_scratch.py

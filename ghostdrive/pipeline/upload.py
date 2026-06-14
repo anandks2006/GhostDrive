@@ -89,6 +89,7 @@ async def _encrypted_chunk_stream(
     descriptor: ChunkDescriptor,
     chunk_key: bytes,
     nonce: bytes,
+    mime_type: str = "application/octet-stream",
 ) -> AsyncGenerator[bytes, None]:
     """
     Async generator: read -> compress -> encrypt -> yield 64 KB ciphertext blocks.
@@ -103,13 +104,13 @@ async def _encrypted_chunk_stream(
     encryptor = ChunkEncryptor(key=chunk_key, nonce=nonce)
 
     raw_stream      = read_chunk_async(path, descriptor.offset, descriptor.size)
-    compress_gen    = compress_stream(raw_stream)
+    compress_gen    = compress_stream(raw_stream, mime_type)
 
     async for block in compress_gen:
-        ct_block = await asyncio.to_thread(encryptor.update, block)
+        ct_block = encryptor.update(block)
         yield ct_block
 
-    tag = await asyncio.to_thread(encryptor.finalize)
+    tag = encryptor.finalize()
     yield tag   # ONE Poly1305 tag -- appended after last block
 
 
@@ -143,6 +144,7 @@ class ChunkUploader:
         for descriptor in split_file(path, backend.logical_chunk_bytes):
             result = await uploader.upload_chunk(path, descriptor, file_id, mime_type)
     """
+    active_uploads: int = 0
 
     def __init__(
         self,
@@ -151,6 +153,7 @@ class ChunkUploader:
         master_key: bytes,
         hkdf_salt: bytes,
         nonce_manager,         # NonceManager instance
+        healing_queue=None,
     ) -> None:
         self._db     = db
         self._backend = backend
@@ -158,8 +161,26 @@ class ChunkUploader:
         self._mk      = master_key
         self._salt    = hkdf_salt
         self._nonces  = nonce_manager
+        self._healing_queue = healing_queue
 
     async def upload_chunk(
+        self,
+        path: Path,
+        descriptor: ChunkDescriptor,
+        file_id: str,
+        mime_type: str = "application/octet-stream",
+    ) -> str:
+        if hasattr(self, '_healing_queue') and self._healing_queue:
+            self._healing_queue._upload_active = True
+        ChunkUploader.active_uploads += 1
+        try:
+            return await self._upload_chunk_internal(path, descriptor, file_id, mime_type)
+        finally:
+            ChunkUploader.active_uploads = max(0, ChunkUploader.active_uploads - 1)
+            if hasattr(self, '_healing_queue') and self._healing_queue:
+                self._healing_queue._upload_active = False
+
+    async def _upload_chunk_internal(
         self,
         path: Path,
         descriptor: ChunkDescriptor,
@@ -190,42 +211,54 @@ class ChunkUploader:
             BackendConnectionError:  Network unreachable.
             asyncio.CancelledError:  Upload cancelled by user (cleaned up).
         """
-        chunk_id = _new_uuid()
-
-        # 1. Derive per-chunk key
+        # The same chunk key is used for all chunks of this file.
+        # Security depends entirely on the nonce counter never repeating (guaranteed
+        # by NonceManager — counter is incremented and fsynced before each upload).
+        # If the nonce uniqueness guarantee is ever broken, encrypting multiple chunks
+        # with the same key becomes catastrophic. Do not change nonce management
+        # without reviewing this dependency.
         chunk_key = derive_chunk_key(self._mk, self._salt)
 
         # 2. Atomic: reserve quota + pending intent + nonce (same transaction)
         nonce_counter: Optional[int] = None
         nonce: Optional[bytes] = None
         quota_reserved = descriptor.size  # conservative: original size
+        backend_id = getattr(self._backend, 'id', 'unknown-backend')
+        chunk_id = _new_uuid()
 
         with self._db.transaction():
             # Reserve quota (raises QuotaReservationError if full)
-            self._qm.reserve(self._backend.id if hasattr(self._backend, 'id') else 'unknown', quota_reserved)
+            self._qm.reserve(backend_id, quota_reserved)
 
-            # Increment nonce BEFORE upload begins (spec §4.4)
-            nonce = self._nonces.next_nonce()
-            from ghostdrive.crypto.nonce import NonceManager
-            nonce_counter = NonceManager.nonce_to_counter(nonce)
+            # Check if chunk record already exists (e.g. from retry or multi-backend upload)
+            existing_chunk = self._db.find_chunk_by_file_and_index(file_id, descriptor.chunk_index)
+            if existing_chunk:
+                chunk_id = existing_chunk["id"]
+                nonce_counter = existing_chunk["nonce_counter"]
+                from ghostdrive.crypto.nonce import NonceManager
+                nonce = NonceManager.counter_to_nonce(nonce_counter)
+            else:
+                # Increment nonce BEFORE upload begins (spec §4.4)
+                nonce = self._nonces.next_nonce()
+                from ghostdrive.crypto.nonce import NonceManager
+                nonce_counter = NonceManager.nonce_to_counter(nonce)
 
-            # Write chunk record with nonce_counter
-            self._db.insert_chunk({
-                "id":              chunk_id,
-                "file_id":         file_id,
-                "chunk_index":     descriptor.chunk_index,
-                "total_chunks":    descriptor.total_chunks,
-                "blake3_hash":     "",   # computed below for dedup -- placeholder
-                "size":            descriptor.size,
-                "nonce_counter":   nonce_counter,
-                "sub_block_count": 1,    # updated after upload
-                "is_manifest":     int(descriptor.is_manifest),
-                "ref_count":       1,
-            })
+                # Write chunk record with nonce_counter
+                self._db.insert_chunk({
+                    "id":              chunk_id,
+                    "file_id":         file_id,
+                    "chunk_index":     descriptor.chunk_index,
+                    "total_chunks":    descriptor.total_chunks,
+                    "blake3_hash":     "",   # computed below for dedup -- placeholder
+                    "size":            descriptor.size,
+                    "nonce_counter":   nonce_counter,
+                    "sub_block_count": 1,    # updated after upload
+                    "is_manifest":     int(descriptor.is_manifest),
+                    "ref_count":       1,
+                })
 
             # Write pending intent (same transaction as nonce)
-            backend_id = getattr(self._backend, 'id', 'unknown-backend')
-            self._db.insert_chunk_location_pending({
+            location_record = {
                 "chunk_id":        chunk_id,
                 "sub_block_index": 0,
                 "backend_id":      backend_id,
@@ -234,14 +267,22 @@ class ChunkUploader:
                 "upload_date":     _now_iso(),
                 "last_verified":   None,
                 "quota_reserved":  quota_reserved,
-            })
+            }
+            existing_loc = self._db.find_chunk_location(chunk_id, 0, backend_id)
+            if existing_loc:
+                self._db.update_chunk_location_pending(location_record)
+            else:
+                self._db.insert_chunk_location_pending(location_record)
 
         # 3. Stream: encrypt -> compress -> sub-block -> upload
         confirmed_sub_blocks: list[tuple[int, str]] = []  # (sub_block_index, reference_id)
 
         try:
-            stream        = _encrypted_chunk_stream(path, descriptor, chunk_key, nonce)
-            sub_block_gen = _split_into_sub_blocks(stream)
+            stream        = _encrypted_chunk_stream(path, descriptor, chunk_key, nonce, mime_type)
+            sub_block_bytes = getattr(self._backend, "sub_block_bytes", _SUB_BLOCK_BYTES)
+            if not isinstance(sub_block_bytes, int) or isinstance(sub_block_bytes, bool):
+                sub_block_bytes = _SUB_BLOCK_BYTES
+            sub_block_gen = _split_into_sub_blocks(stream, sub_block_bytes=sub_block_bytes)
 
             sub_block_index = 0
             async for sub_block_data in sub_block_gen:

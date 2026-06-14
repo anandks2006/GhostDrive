@@ -142,8 +142,8 @@ class TelegramBackend(BackendBase):
 
     def __init__(
         self,
-        api_id: int,
-        api_hash: str,
+        api_id: Optional[int] = None,
+        api_hash: Optional[str] = None,
         phone: Optional[str] = None,
     ) -> None:
         """
@@ -165,6 +165,15 @@ class TelegramBackend(BackendBase):
         self._api_id   = api_id
         self._api_hash = api_hash
         self._phone    = phone
+
+        if self._api_id is None and _KEYRING_AVAILABLE:
+            val = _keyring.get_password("ghostdrive", "telegram_api_id")
+            self._api_id = int(val) if val and val.isdigit() else None
+        if self._api_hash is None and _KEYRING_AVAILABLE:
+            self._api_hash = _keyring.get_password("ghostdrive", "telegram_api_hash")
+        if self._phone is None and _KEYRING_AVAILABLE:
+            self._phone = _keyring.get_password("ghostdrive", "telegram_phone")
+
         self._client: Optional[TelegramClient] = None
 
     # ── Connection lifecycle ──────────────────────────────────────────────────

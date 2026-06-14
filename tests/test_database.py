@@ -192,10 +192,10 @@ class TestHMACLedger:
         db = _make_db(tmp_path)
         try:
             row = db._conn.execute(
-                "SELECT last_hmac, row_count FROM hmac_ledger WHERE id = 1"
+                "SELECT last_hmac, logical_clock FROM hmac_ledger WHERE id = 1"
             ).fetchone()
             assert row is not None
-            assert row[1] == 0  # row_count starts at 0
+            assert row[1] == 0  # logical_clock starts at 0
 
             # Verify genesis HMAC matches expected value
             expected = hmac_module.new(ledger_key, genesis_seed, hashlib.sha512).hexdigest()
@@ -638,6 +638,63 @@ class TestDedupDB:
             assert count == 0
         finally:
             db.close()
+
+    def test_purge_file_permanently_with_shared_chunks(self, tmp_path):
+        db = _make_db(tmp_path)
+        try:
+            fid1 = _make_file(db)
+            fid2 = _make_file(db)
+
+            cid = _uuid()
+            with db.transaction():
+                db.insert_chunk({
+                    "id": cid, "file_id": fid1, "chunk_index": 0,
+                    "total_chunks": 1, "blake3_hash": "shared_hash", "size": 1024,
+                    "nonce_counter": 1, "sub_block_count": 1,
+                    "is_manifest": 0, "ref_count": 2,
+                })
+
+            bid = _make_backend(db)
+            with db.transaction():
+                db.insert_chunk_location_pending({
+                    "chunk_id": cid, "sub_block_index": 0, "backend_id": bid,
+                    "reference_id": "", "url_type": "permanent",
+                    "upload_date": "2026-06-14T00:00:00Z", "last_verified": None,
+                    "quota_reserved": 1024,
+                })
+                db.confirm_chunk_location(cid, 0, bid, "ref1")
+
+            with db.transaction():
+                db.purge_file_permanently(fid1)
+
+            # Verification 1: file1 is purged, but shared chunk and locations are preserved
+            row_file1 = db._conn.execute("SELECT id FROM files WHERE id = ?", (fid1,)).fetchone()
+            assert row_file1 is None
+
+            row_chunk = db._conn.execute("SELECT ref_count FROM chunks WHERE id = ?", (cid,)).fetchone()
+            assert row_chunk is not None
+            assert row_chunk["ref_count"] == 1
+
+            row_loc = db._conn.execute("SELECT chunk_id FROM chunk_locations WHERE chunk_id = ?", (cid,)).fetchone()
+            assert row_loc is not None
+
+            # Now, simulate mapping to fid2 and purge it
+            with db.transaction():
+                db._conn.execute("UPDATE chunks SET file_id = ? WHERE id = ?", (fid2, cid))
+                db.purge_file_permanently(fid2)
+
+            # Verification 2: file2 is purged, and the chunk and locations are finally deleted (ref_count reached 0)
+            row_file2 = db._conn.execute("SELECT id FROM files WHERE id = ?", (fid2,)).fetchone()
+            assert row_file2 is None
+
+            row_chunk = db._conn.execute("SELECT ref_count FROM chunks WHERE id = ?", (cid,)).fetchone()
+            assert row_chunk is None
+
+            row_loc = db._conn.execute("SELECT chunk_id FROM chunk_locations WHERE chunk_id = ?", (cid,)).fetchone()
+            assert row_loc is None
+        finally:
+            db.close()
+
 
 
 # ── FTS5 tests ────────────────────────────────────────────────────────────────

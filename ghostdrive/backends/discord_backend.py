@@ -4,9 +4,9 @@ discord_backend.py -- GhostDrive Discord Backend Plugin.
 Spec §6.2 -- Discord
 =====================
 Tier:              IMPORTANT
-Free tier:         Unlimited storage
-Logical chunk:     24 MB
-Sub-block:         24 MB (same -- Discord sends whole attachments)
+Free tier:         Unlimited storage (10 MB attachment limit)
+Logical chunk:     8 MB
+Sub-block:         8 MB (headroom under 10 MB Discord limit)
 is_ephemeral_url:  True -- CDN URLs expire; message_id + channel_id stored
 Capability flags:  NOT cold_storage, NOT ml_artifacts_only, NOT cpu_intensive
 ToS risk:          Experimental label (spec §6.2 note)
@@ -14,9 +14,8 @@ ToS risk:          Experimental label (spec §6.2 note)
 Discord-specific constraints (June 2025)
 -----------------------------------------
 - Max attachment per message: 10 MB (10,485,760 bytes hard limit)
-- Operational chunk size: 8 MB (headroom for multipart overhead)
-- Logical chunk cap in spec: 24 MB (split into 3 × 8 MB sub-blocks)
-- Sub-block = 1 Discord message with 1 attachment
+- Operational chunk size: 8 MB (provides headroom for multipart upload overhead under 10 MB free limit)
+- Sub-block = 1 Discord message with 1 attachment (8 MB)
 - CDN URLs expire after ~24 h when accessed outside Discord
 - Bot rate limit: ~5 messages / 5 s on free bots -> inter-upload delay
 
@@ -77,7 +76,7 @@ from ghostdrive.exceptions import (
 DISCORD_HARD_LIMIT_BYTES  = 10 * 1024 * 1024     # 10 MB absolute ceiling
 OPERATIONAL_SUB_BLOCK_BYTES = 8 * 1024 * 1024    # 8 MB -- safe operational limit
 
-# Spec §5.4: logical chunk = 24 MB, sub-block = 24 MB
+# Spec: logical chunk = 8 MB, sub-block = 8 MB (operates under the 10 MB Discord free tier limit, with 8 MB sub-blocks providing headroom for multipart upload overhead)
 # Each sub-block is one Discord attachment (max OPERATIONAL_SUB_BLOCK_BYTES)
 LOGICAL_CHUNK_BYTES = 24 * 1024 * 1024            # 24 MB
 SUB_BLOCK_BYTES     = OPERATIONAL_SUB_BLOCK_BYTES  # 8 MB per attachment
@@ -201,14 +200,19 @@ class DiscordBackend(BackendBase):
         self._client     = _GhostDriveDiscordClient()
 
         # Start the bot in a background task (discord.py event loop requirement)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._bot_task = loop.create_task(self._client.start(token))
 
         try:
             await asyncio.wait_for(self._client.ready_event.wait(), timeout=30)
-        except asyncio.TimeoutError as exc:
+        except Exception as exc:
+            await self.disconnect()
+            if isinstance(exc, asyncio.TimeoutError):
+                raise BackendConnectionError(
+                    "Discord bot failed to connect within 30s."
+                ) from exc
             raise BackendConnectionError(
-                "Discord bot failed to connect within 30s."
+                f"Discord connection failed: {exc}"
             ) from exc
 
         logger.info("Discord backend connected.")

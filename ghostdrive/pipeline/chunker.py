@@ -29,7 +29,7 @@ import dataclasses
 import logging
 import os
 from pathlib import Path
-from typing import Generator, Optional
+from typing import AsyncGenerator, Generator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +163,7 @@ async def read_chunk_async(
     offset: int,
     size: int,
     block_size: int = 65_536,
-) -> "AsyncGenerator[bytes, None]":
+) -> AsyncGenerator[bytes, None]:
     """
     Async generator that reads one logical chunk from a file in 64 KB blocks.
 
@@ -190,8 +190,3 @@ async def read_chunk_async(
                 break
             yield block
             bytes_remaining -= len(block)
-
-
-# Make read_chunk_async an actual async generator (annotate properly)
-from typing import AsyncGenerator  # noqa: E402 (after function def)
-read_chunk_async.__annotations__["return"] = "AsyncGenerator[bytes, None]"

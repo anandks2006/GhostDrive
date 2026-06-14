@@ -737,3 +737,182 @@ class TestChunkUploader:
         assert backend_row["quota_reserved"] == 0
         
         db.close()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_retry_after_failure(self, tmp_path):
+        from ghostdrive.pipeline.upload import ChunkUploader
+        from ghostdrive.crypto.nonce import NonceManager
+        from ghostdrive.exceptions import BackendConnectionError
+
+        db = _make_db(tmp_path)
+        backend_id = _make_backend_row(db)
+
+        # Mock backend that fails first, then succeeds
+        mock_backend = MagicMock()
+        mock_backend.id = backend_id
+        mock_backend.upload = AsyncMock(side_effect=BackendConnectionError("connection failed"))
+
+        nm = NonceManager(data_dir=tmp_path)
+        file_path = tmp_path / "source.txt"
+        file_path.write_bytes(b"C" * 1024)
+
+        descriptor = ChunkDescriptor(
+            chunk_index=0,
+            offset=0,
+            size=1024,
+            total_chunks=1,
+            is_manifest=False,
+        )
+        file_id = str(uuid.uuid4())
+
+        now = "2024-01-01T00:00:00+00:00"
+        with db.transaction():
+            db.insert_file({
+                "id": file_id, "name": "source.txt", "path": "/source.txt",
+                "size": 1024, "mime_type": "text/plain", "tier": "IMPORTANT",
+                "created_at": now, "modified_at": now,
+                "version": 1, "version_of": None,
+                "tombstone": 0, "tombstone_at": None,
+            })
+
+        uploader = ChunkUploader(
+            db=db,
+            backend=mock_backend,
+            master_key=bytes(range(32)),
+            hkdf_salt=bytes(range(32, 64)),
+            nonce_manager=nm,
+        )
+
+        # First attempt (fails)
+        with pytest.raises(BackendConnectionError):
+            await uploader.upload_chunk(
+                path=file_path,
+                descriptor=descriptor,
+                file_id=file_id,
+                mime_type="text/plain",
+            )
+
+        # Verify chunk row exists, location is failed
+        assert db._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+        loc_row = db._conn.execute("SELECT status FROM chunk_locations").fetchone()
+        assert loc_row["status"] == "failed"
+
+        # Change mock backend behavior to succeed on retry
+        mock_backend.upload.side_effect = None
+        mock_backend.upload.return_value = "ref-retry-123"
+
+        # Second attempt (succeeds)
+        chunk_id = await uploader.upload_chunk(
+            path=file_path,
+            descriptor=descriptor,
+            file_id=file_id,
+            mime_type="text/plain",
+        )
+
+        assert chunk_id is not None
+        assert db._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+        loc_row = db._conn.execute("SELECT status, reference_id FROM chunk_locations").fetchone()
+        assert loc_row["status"] == "confirmed"
+        assert loc_row["reference_id"] == "ref-retry-123"
+
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_multiple_backends(self, tmp_path):
+        from ghostdrive.pipeline.upload import ChunkUploader
+        from ghostdrive.crypto.nonce import NonceManager
+
+        db = _make_db(tmp_path)
+        
+        # Create two separate backends
+        backend_id1 = _make_backend_row(db)
+        backend_id2 = str(uuid.uuid4())
+        with db.transaction():
+            db._conn.execute(
+                """INSERT INTO backends (id, type, credentials_ref, status, priority)
+                   VALUES (?, 'discord', 'keyring-ref', 'healthy', 100)""",
+                (backend_id2,),
+            )
+
+        # Mock two backends
+        mock_backend1 = MagicMock()
+        mock_backend1.id = backend_id1
+        mock_backend1.upload = AsyncMock(return_value="ref-backend1")
+
+        mock_backend2 = MagicMock()
+        mock_backend2.id = backend_id2
+        mock_backend2.upload = AsyncMock(return_value="ref-backend2")
+
+        nm1 = NonceManager(data_dir=tmp_path / "backend1")
+        nm2 = NonceManager(data_dir=tmp_path / "backend2")
+        
+        file_path = tmp_path / "source.txt"
+        file_path.write_bytes(b"D" * 1024)
+
+        descriptor = ChunkDescriptor(
+            chunk_index=0,
+            offset=0,
+            size=1024,
+            total_chunks=1,
+            is_manifest=False,
+        )
+        file_id = str(uuid.uuid4())
+
+        now = "2024-01-01T00:00:00+00:00"
+        with db.transaction():
+            db.insert_file({
+                "id": file_id, "name": "source.txt", "path": "/source.txt",
+                "size": 1024, "mime_type": "text/plain", "tier": "IMPORTANT",
+                "created_at": now, "modified_at": now,
+                "version": 1, "version_of": None,
+                "tombstone": 0, "tombstone_at": None,
+            })
+
+        uploader1 = ChunkUploader(
+            db=db,
+            backend=mock_backend1,
+            master_key=bytes(range(32)),
+            hkdf_salt=bytes(range(32, 64)),
+            nonce_manager=nm1,
+        )
+
+        uploader2 = ChunkUploader(
+            db=db,
+            backend=mock_backend2,
+            master_key=bytes(range(32)),
+            hkdf_salt=bytes(range(32, 64)),
+            nonce_manager=nm2,
+        )
+
+        # Upload chunk to backend 1
+        chunk_id1 = await uploader1.upload_chunk(
+            path=file_path,
+            descriptor=descriptor,
+            file_id=file_id,
+            mime_type="text/plain",
+        )
+
+        # Upload chunk to backend 2 (should reuse same chunk row)
+        chunk_id2 = await uploader2.upload_chunk(
+            path=file_path,
+            descriptor=descriptor,
+            file_id=file_id,
+            mime_type="text/plain",
+        )
+
+        assert chunk_id1 == chunk_id2
+
+        # Verify DB entries: 1 chunk record, 2 chunk locations
+        assert db._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+        assert db._conn.execute("SELECT COUNT(*) FROM chunk_locations").fetchone()[0] == 2
+
+        locs = db._conn.execute("SELECT backend_id, status, reference_id FROM chunk_locations").fetchall()
+        loc_map = {loc["backend_id"]: loc for loc in locs}
+        
+        assert loc_map[backend_id1]["status"] == "confirmed"
+        assert loc_map[backend_id1]["reference_id"] == "ref-backend1"
+        assert loc_map[backend_id2]["status"] == "confirmed"
+        assert loc_map[backend_id2]["reference_id"] == "ref-backend2"
+
+        db.close()
+

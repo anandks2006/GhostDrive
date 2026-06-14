@@ -361,23 +361,55 @@ class ChunkDecryptor:
                 "NO decrypted data has been returned."
             )
 
-        # ── Step 3: Decrypt only after successful MAC verification ────────────
+        # ── Step 3: Decrypt only after successful MAC verification — stream decryption in 64 KB blocks:
         chacha20 = _make_chacha20_encryptor(self._key, self._nonce)
-        plaintext = chacha20.update(bytes(self._ct_buffer))
-
-        return plaintext
+        result = bytearray()
+        buf = bytes(self._ct_buffer)
+        offset = 0
+        while offset < len(buf):
+            block = buf[offset : offset + BLOCK_SIZE]
+            result.extend(chacha20.update(block))
+            offset += BLOCK_SIZE
+        return bytes(result)
 
     def verify_and_decrypt_streaming(self) -> "Generator[bytes, None, None]":
         """
         Variant that yields plaintext in BLOCK_SIZE chunks after tag verification.
         Still verifies the tag FIRST — no plaintext is yielded before that.
 
-        Useful for large chunks to avoid holding the full plaintext in memory.
+        Useful for large chunks to avoid holding the full plaintext or its copies in memory.
         """
-        plaintext = self.verify_and_decrypt()
+        if self._verified:
+            raise CryptoError(
+                "ChunkDecryptor.verify_and_decrypt_streaming() called after verification."
+            )
+        self._verified = True
+
+        # ── Step 1: Finalise the MAC computation ──────────────────────────────
+        if self._total_ct_len > 0:
+            pad = (16 - self._total_ct_len % 16) % 16
+            if pad:
+                self._poly.update(b"\x00" * pad)
+
+        # RFC 8439 length fields
+        self._poly.update(struct.pack("<QQ", self._aad_len, self._total_ct_len))
+        computed_tag = self._poly.finalize()
+
+        # ── Step 2: Constant-time tag comparison ──────────────────────────────
+        if not verify_auth_tag(computed_tag, self._expected_tag):
+            raise AuthenticationError(
+                "Poly1305 authentication tag verification FAILED. "
+                "The chunk is corrupted, tampered, or the wrong key/nonce was used. "
+                "NO decrypted data has been returned."
+            )
+
+        # After verify_auth_tag() passes:
+        chacha20 = _make_chacha20_encryptor(self._key, self._nonce)
+        buf = bytes(self._ct_buffer)
         offset = 0
-        while offset < len(plaintext):
-            yield plaintext[offset : offset + BLOCK_SIZE]
+        while offset < len(buf):
+            block = buf[offset : offset + BLOCK_SIZE]
+            yield chacha20.update(block)
             offset += BLOCK_SIZE
 
 

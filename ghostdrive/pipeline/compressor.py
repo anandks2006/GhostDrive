@@ -97,17 +97,17 @@ async def compress_stream(
             yield block
         return
 
-    # zstd streaming compressor (synchronous C extension, run in thread)
+    # zstd streaming compressor (synchronous C extension)
     compressor = zstd.ZstdCompressor(level=ZSTD_LEVEL)
     comp_obj   = compressor.compressobj()
 
     async for block in data_stream:
-        compressed = await asyncio.to_thread(comp_obj.compress, block)
+        compressed = comp_obj.compress(block)
         if compressed:
             yield compressed
 
     # Flush final frame
-    tail = await asyncio.to_thread(comp_obj.flush)
+    tail = comp_obj.flush()
     if tail:
         yield tail
 
@@ -140,7 +140,7 @@ async def decompress_stream(
     decomp_obj   = decompressor.decompressobj()
 
     async for block in data_stream:
-        decompressed = await asyncio.to_thread(decomp_obj.decompress, block)
+        decompressed = decomp_obj.decompress(block)
         if decompressed:
             yield decompressed
 
