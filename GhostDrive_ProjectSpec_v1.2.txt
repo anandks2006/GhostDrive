@@ -1,0 +1,891 @@
+GHOSTDRIVE
+Encrypted · Redundant · Multi-Backend Personal Cloud
+Project Specification Document
+v1.2  -  June 2026
+
+Author
+Anand K S
+Programme
+Bachelor of Computer Applications (BCA), 3rd Year
+Submission
+BCA Final Year Project - 2026-27
+Language
+Python 3.11+
+GUI
+PyQt6
+Document
+Project Specification v1.2 (final hardened revision)
+
+Design Philosophy
+"Never let the app lie. Never let the data die." - Every architectural decision flows from these two principles.
+
+v1.2 Change Summary
+This revision incorporates all findings from seven rounds of adversarial technical review. New in v1.2: Poly1305 single-tag-per-chunk authentication scope fix, nonce increment ordering (before upload, not after), OS file locking replacing pre-hash double-read, constant-time comparisons (hmac.compare_digest) throughout, HKDF salt and info string definitions, test recovery verification step, clean shutdown sequence, exception handling philosophy, CLI key handoff via session-derived key, Lamport clock atomicity with WAL, reference counting for shared chunks, FTS5 vacuum on tombstone expiry, Chunk 0 special replication schema, passphrase change procedure, credential storage mechanism, quota reservation race fix, log sanitization rules, index snapshot cross-backend hash verification, corrupted chunk auto-recovery path, thermal throttling backpressure, OOM killer SIGTERM handler, fsync on security-critical writes, pre-flight connectivity test, notification categories, bulk export disaster recovery mode, sharing audit log, DISPOSABLE tier immediate chunk cleanup, and developer process standards.
+
+
+1. Executive Summary
+GhostDrive is a desktop application that turns free-tier accounts on existing internet services into a unified, encrypted, redundant personal cloud drive. Supported backends: Telegram, GitHub Releases, Discord, Mega.nz, Hugging Face, Backblaze B2, Cloudflare R2, Storj, Archive.org (DISPOSABLE only), and IPFS. No dedicated server required. No backend ever sees plaintext data.
+Primary use cases: large machine-learning artifacts (model checkpoints, datasets) alongside irreplaceable personal files (family photos, documents). Two redundancy categories match engineering effort to actual importance. A headless CLI companion enables direct upload from Kaggle and Google Colab without double-transferring data through the laptop.
+
+2. Problem Statement
+• Google Drive 15 GB free tier fills rapidly with ML checkpoints and training datasets.
+• Paid storage is a recurring cost compounding over time.
+• Existing tools (Telegram-Drive, YouTubeDrive, D-Drive) use single backends, no encryption, no redundancy.
+• No existing tool treats client-side encryption as a first-class requirement.
+• No tool offers tiered redundancy matched to file criticality.
+
+3. Scope
+3.1 Phase 1 - Months 1-6
+• Full cryptographic pipeline: ChaCha20-Poly1305 (single tag per chunk), AES-256-GCM key wrapping, Argon2id, HKDF-SHA512 with defined salt and info strings
+• 64 KB generator streaming (hard constraint), OS file locking, fsync on critical writes
+• 50 MB sub-block transmission, two-phase commit, BLAKE3+size deduplication (pre-compression hash), quota reservation, reference counting for shared chunks
+• Backend Abstraction Layer: 10 day-one plugins, ephemeral URL handling, pin verification, ml_artifacts_only flag
+•• Three-tier database split: ghostdrive.db (synced), ghostdrive_search.fts (local search index), and ghostdrive_cache/ directory (local throwaway cache)
+• UUIDv4 primary keys, Lamport clocks, WAL checkpoint protocol, tombstone vacuum (with FTS5 sync), integrity_log pruning
+• Tiered redundancy (CRITICAL 4x / IMPORTANT 3x / DISPOSABLE 2x), lazy polling, healing trickle queue
+• Emergency Cross-Mirroring, Chunk 0 special replication, self-describing manifest
+• PyQt6 GUI: all views, telemetry panel (Month 3), pre-flight test, notification categories, clean shutdown sequence
+• Credential storage via OS keyring (libsecret/DPAPI/Keychain), Argon2id single-derivation rule
+• Kaggle/Colab CLI: session-derived key handoff, JSON sync with errors array, dedup awareness, schema_version field
+3.2 Phase 2 - Months 7-9
+• ML-KEM-768 sharing, contacts, rendezvous delivery, bilateral TTL cleanup, sharing_audit_log
+• Reed-Solomon erasure coding (zfec, 4+2 shards)
+• Streaming video/audio playback, community plugin system, external drive and LAN backends
+• Bulk export / disaster recovery mode
+3.3 Out of Scope
+• Web or mobile app. Shared infrastructure. Guaranteed ToS compliance (user responsibility).
+
+
+4. Cryptographic Architecture
+4.1 Algorithm Stack
+Algorithm
+Role
+Rationale
+Argon2id
+Passphrase ? keystore key
+Memory-hard, GPU-resistant. Auto-calibrated to ~1 s. Runs ONCE per session at unlock. Never re-derived mid-session.
+HKDF-SHA512
+Master Key ? subkeys
+Defined salt (random 32-byte, generated at first run, stored in keystore.json). Defined info strings per key purpose. Different info = cryptographically isolated subkeys.
+ChaCha20-Poly1305
+Chunk payload streaming
+ONE Poly1305 tag per entire logical chunk - not per 64 KB block. Tag covers the complete ciphertext. Streaming-friendly. Nonce counter incremented BEFORE upload begins.
+AES-256-GCM
+Key wrapping, small structs
+Per-file key wrapping, index entries, share packages. Full plaintext always in memory - GCM appropriate here.
+BLAKE3 + file_size
+Dedup key (pre-compression)
+Hash computed on original file BEFORE zstd compression. Ensures same file deduplicates regardless of compression level or settings.
+HMAC-SHA512
+SQLite ledger chain
+Every write chained to predecessor. Genesis block uses a defined initialization seed stored in keystore.json.
+hmac.compare_digest
+All secret comparisons
+Constant-time comparison throughout codebase. Python == on bytes is NOT constant-time. All auth tag, hash, and passphrase comparisons use this.
+ML-KEM-768
+Share key encapsulation
+Post-quantum key exchange for Phase 2 sharing only.
+
+4.2 HKDF Info Strings - Key Purpose Binding
+Without distinct info strings, subkeys derived from the same Master Key are indistinguishable. The following info strings are fixed constants in the codebase:
+Info String
+Derived Key Purpose
+"sloth-chunk-enc-v1"
+ChaCha20-Poly1305 chunk encryption key
+"sloth-hmac-v1"
+HMAC-SHA512 SQLite ledger chain key
+"sloth-keystore-enc-v1"
+AES-256-GCM keystore.json encryption key
+"sloth-share-key-v1"
+Share package encryption (Phase 2)
+"sloth-index-backup-name-v1"
+Deterministic index backup filename derivation
+"sloth-cli-session-v1"
+CLI companion session-derived key (scoped, time-limited)
+"sloth-db-snapshot-v1"
+DB snapshot encryption key
+
+4.3 Master Key Architecture
+Key Derivation Chain:
+passphrase
+    → Argon2id (time=3, mem=64MB, parallelism=4)
+    → Master Key (32 bytes)
+    → HKDF-SHA512 with defined salt and info strings
+        → Chunk Encryption Key (info: "sloth-chunk-enc-v1")
+        → HMAC Key (info: "sloth-hmac-v1")
+        → CLI Session Key (info: "sloth-cli-session-v1")
+        → DB Snapshot Encryption Key (info: "sloth-db-snapshot-v1")
+
+FIRST RUN (First-Launch UX Flow):
+  Step 1 — User creates a passphrase (minimum entropy enforced, zxcvbn score ≥ 3).
+  Step 2 — Master Key derived via Argon2id.
+  Step 3 — Fresh ghostdrive.db created and encrypted.
+  Step 4 — App immediately pushes DB snapshot to primary backend.
+  Step 5 — App performs a test recovery: pulls the snapshot, decrypts it, verifies integrity.
+  Step 6 — If verification passes, user is shown: "Your vault is backed up and recoverable. You're ready." If verification fails, user is warned and the issue must be resolved before proceeding.
+
+NORMAL UNLOCK:
+  Argon2id(passphrase) → Master Key (32 bytes) in ctypes buffer
+  Passphrase zeroed from memory immediately (ctypes explicit zero)
+  All workers receive memory-safe key reference ONLY
+
+PASSPHRASE CHANGE:
+  Unlock with current passphrase  →  Master Key derived
+  Argon2id(new_passphrase)  →  new Master Key derived
+  Re-key the SQLCipher database (PRAGMA rekey) with the new Master Key and re-encrypt the DB snapshot with the new Master Key.
+
+RECOVERY (lost laptop / forgotten passphrase):
+  Recovery is performed by importing a previously exported ghostdrive.db snapshot and entering the account passphrase.
+
+4.4 Critical Cryptographic Rules
+• Poly1305 authentication: ONE tag per logical chunk. The entire chunk ciphertext is authenticated as a single unit. Individual 64 KB blocks are NOT independently authenticated. The tag is appended after the last block and verified before any decrypted byte is returned to the application.
+• Nonce counter: incremented BEFORE the chunk upload begins, not after it confirms. A wasted nonce from a failed upload is acceptable. A reused nonce from crash-before-increment is catastrophic under ChaCha20-Poly1305.
+• Nonce counter increment and the operation it timestamps must be in the same SQLite transaction - atomic with the write they protect.
+• ChaCha20-Poly1305 maximum message size is 2^38 - 64 bytes (~256 GB). No logical chunk approaches this. Documented for future developers.
+• HKDF salt is fixed per installation, stored in keystore.json, and must be shared with the Kaggle CLI for consistent subkey derivation across devices.
+• The HMAC ledger genesis block uses a defined initialization seed (stored in keystore.json), solving the chain verification edge case on a single-record database.
+
+4.5 Credential Storage
+Backend credentials are never stored in ghostdrive.db or any plaintext file. Storage mechanism per platform:
+Platform
+Mechanism
+Notes
+Linux
+libsecret (GNOME Keyring / KWallet)
+Accessed via secretstorage Python library
+Windows
+DPAPI (CryptProtectData)
+Accessed via win32crypt or keyring library
+macOS
+Keychain
+Accessed via keyring library
+Fallback (no keyring)
+AES-256-GCM encrypted file
+Key derived from Master Key via HKDF. Last resort only - warned in UI.
+The backends table in ghostdrive.db stores only a credentials_ref string (a keyring service name + account key), never the credential itself.
+
+4.6 Key Material in Memory
+Master Key and all derived keys held in ctypes buffers, explicitly zeroed after use. fsync() called after writing nonce counter, two-phase commit intent record, and keystore.json - ensuring these reach persistent storage before dependent operations begin. On Windows, VirtualLock() prevents paging of key material to pagefile.sys where privileges allow; documented as a known limitation where not available. App warns users that OS hibernation captures RAM.
+
+
+5. Chunking Engine
+5.1 Pipeline - Zero-Copy Streaming (Hard Constraint)
+File ? OS file lock acquired ? zstd compress (skipped for pre-compressed formats) ? BLAKE3+size dedup check (on original, pre-compression) ? split into logical chunks ? nonce counter incremented (fsync) ? ChaCha20-Poly1305 stream via 64 KB generator ? Poly1305 tag appended after final block ? transmit as 50 MB sub-blocks ? distribute to backends.
+64 KB generator streaming is a hard architectural constraint. No BytesIO buffers. No intermediate disk writes. The encryptor streams 64 KB blocks through update(), finalizes with a single Poly1305 tag, and yields directly to the network socket. asyncio.to_thread() wraps the encryptor.update() call to keep ChaCha20 CPU work off the main Qt thread. One persistent encryption thread per active upload stream - not one thread per block - to prevent thread pool exhaustion.
+Streaming Pipeline (conceptual):
+async def encrypted_chunk_stream(file_path, offset, size, key, nonce):
+    # OS file lock held for duration of this call
+    # nonce already incremented and fsynced before this is called
+    encryptor = ChaCha20Poly1305(key)  # one instance per chunk
+    async with aiofiles.open(file_path, "rb") as f:
+        await f.seek(offset)
+        bytes_read = 0
+        while bytes_read < size:
+            block = await f.read(min(65536, size - bytes_read))
+            if not block: break
+            ct_block = await asyncio.to_thread(encryptor.update, block)
+            yield ct_block   # 64 KB ciphertext block -> socket
+            bytes_read += len(block)
+        tag = encryptor.finalize()  # ONE Poly1305 tag for entire chunk
+        yield tag                   # appended after last block
+
+# Assembly: concatenate all sub-blocks, verify tag LAST
+# Never return any decrypted byte before tag verification passes
+
+5.2 OS File Locking
+The pre-hash double-read (BLAKE3 before upload, then re-read for encryption) is eliminated. A single streaming pass reads the file once. File integrity during upload is guaranteed by OS-level file locking:
+• Linux/macOS: fcntl.flock(fd, LOCK_EX | LOCK_NB) at upload start
+• Windows: msvcrt.locking() via a cross-platform abstraction wrapper
+• Lock acquisition failure (permission error, read-only filesystem, another process holds lock): warn user, proceed without lock, flag file as uploaded-without-integrity-lock in index. Upload is not aborted.
+• Lock held for entire upload duration. Released on completion, cancellation, or failure.
+
+5.3 Thermal Throttling Backpressure
+A Ryzen 5500U under sustained load will thermal throttle after 15-20 minutes, slowing encryption output. If encryption becomes slower than network send rate, upload stalls or times out. The pipeline implements backpressure: the network send rate is gated by encryption output, not assumed constant. If the encryption generator stalls, the upload coroutine waits rather than timing out.
+
+5.4 Chunk Size and Sub-Block Transmission
+Backend
+Logical Chunk
+Sub-Block
+Notes
+Telegram
+1.5 GB
+50 MB
+Primary. Flood wait handler. Dedicated account.
+GitHub
+1.9 GB
+50 MB
+422 error on duplicate filename: delete partial, retry.
+Discord
+24 MB
+24 MB
+Ephemeral URL: store message_id+channel_id only.
+Mega.nz
+100 MB
+50 MB
+cpu_intensive=True. Deprioritized above 70% CPU.
+Hugging Face
+5 GB
+50 MB
+ml_artifacts_only=True. Git LFS protocol.
+S3-compatible
+500 MB
+50 MB
+Backblaze B2, Cloudflare R2, Storj. Hard quota cap.
+IPFS
+256 MB
+50 MB
+CIDv1 normalized. Pin status verified via pinning API.
+Sub-block assembly rule: all sub-blocks must be present and concatenated before the Poly1305 tag (at the end of the final sub-block) is verified. Authentication is never attempted on a partial chunk.
+
+5.5 Deduplication
+BLAKE3 hash computed on the original file BEFORE zstd compression. This ensures the same file deduplicates regardless of compression level used on different devices or sessions. The composite key BLAKE3_hash + file_size is checked against the index. Match: soft-link entry, no re-upload. The byte-level verify pass is removed - SHA-256/BLAKE3 collision is not a practical concern.
+Race condition fix: before starting an upload, a per-content-hash advisory lock is acquired in the database (exclusive transaction). A second concurrent upload of the same file waits, then deduplicates against the first upload's completed entry.
+
+5.6 Two-Phase Commit and Quota Reservation
+Before any chunk sub-block leaves the machine: (1) quota_reserved is decremented atomically in the backends table (SELECT + UPDATE in a single exclusive transaction - prevents two concurrent uploads double-spending the same quota); (2) a pending intent record is written to chunk_locations with status=pending and fsynced. Upload proceeds. On confirm: status updated to confirmed, quota_used incremented. On failure: status set to failed, quota_reserved restored.
+On startup: pending records are scanned. The backend is queried to determine if the upload completed. Confirmed ? status updated. Not found ? status set to failed, quota_reserved restored.
+
+5.7 Cancellation Flow
+When a user cancels an in-progress upload: (1) the upload coroutine is cancelled via asyncio task cancellation; (2) the network stream is closed cleanly; (3) a backend delete() is attempted for any sub-blocks already confirmed; (4) the chunk_locations record is set to status=cancelled (distinct from failed); (5) quota_reserved is restored; (6) any in-progress healing tasks for this file's chunks are cancelled.
+
+5.8 Reference Counting for Shared Chunks
+Deduplication creates shared chunk ownership: multiple files reference the same chunk_id. A reference count is maintained per chunk (ref_count column in the chunks table). On file deletion (tombstone creation): ref_count is decremented for each of the file's chunks. Backend delete() is issued only when ref_count reaches zero. On tombstone vacuum: same check. A chunk is never deleted from a backend while ref_count > 0.
+
+5.9 Edge Cases
+• Empty files: stored as zero-sub-block manifest entry.
+• Symlinks: followed with depth limit (max 10) to prevent infinite loops.
+• Unicode filenames: explicit UTF-8 throughout via pathlib.
+• File modified during upload: OS lock prevents modification. If lock unavailable and file changes detected post-upload (size mismatch): warn and re-upload.
+• Last block padding: length stored in chunk header for unambiguous removal.
+• zstd non-determinism: dedup hash computed pre-compression on original bytes. Compression level is a fixed constant (level 3) - never user-configurable for deduplication correctness.
+
+
+6. Backend Abstraction Layer
+6.1 Plugin Interface
+Method
+Semantics
+upload(stream,chunk_id,sub_block_index)
+Returns reference_id. Two-phase: pending written before call, confirmed after. Quota reserved before call.
+download(reference_id)
+Async bytes generator. Discord: fetches fresh CDN URL via API before download. Never returns bytes before auth tag verified.
+delete(reference_id)
+Returns bool. Soft-delete: marks deletion-pending in index for 24 h before actual API deletion (recovery window for accidental deletions).
+health_check()
+Returns HealthResult(reachable, quota_remaining, pin_status?). IPFS: must verify pin active via pinning service API - not just gateway reachability.
+available_space()
+Returns int bytes. Hard-capped for S3 backends at free tier limit. Respects quota_reserved field.
+
+Capability flags: supports_range_requests, supports_streaming, supports_deletion, is_cold_storage, is_ephemeral_url, ml_artifacts_only, cpu_intensive.
+
+6.2 Day-One Backends
+Backend
+Free Tier
+Max Tier
+Notes
+Telegram
+Unlimited
+CRITICAL
+Dedicated account. Flood wait handler. MTProto session in OS keyring. Session expiry detection (distinct from generic auth error) triggers manual reauth alert.
+GitHub Releases
+~5 GB/repo
+IMPORTANT
+Multi-repo at quota. 422 on duplicate filename: delete partial asset, retry. 5000 req/hr API limit.
+Discord
+Unlimited
+IMPORTANT
+is_ephemeral_url=True. Store message_id+channel_id. Highest ToS risk - experimental label.
+Mega.nz
+20 GB
+CRITICAL
+cpu_intensive=True. async-mega-py primary; MEGAcmd subprocess fallback. Double-encryption documented.
+Hugging Face
+Unlimited
+IMPORTANT
+ml_artifacts_only=True. Git LFS. Empirically calibrated backoff (undocumented strict rate limits).
+Backblaze B2
+10 GB
+IMPORTANT
+S3-compatible. Hard quota cap. No billing events.
+Cloudflare R2
+10 GB
+IMPORTANT
+Zero egress fees. Dedicated metadata edge cache (index backups, thumbnails). Hard quota cap.
+Storj
+25 GB
+IMPORTANT
+S3-compatible. Satellite locked at first upload (US1/EU1/AP1 - never change after first use).
+Archive.org
+Unlimited
+DISPOSABLE
+DISPOSABLE only. High-entropy blobs trigger malware heuristics. Immediate chunk deletion on tombstone (no 30-day wait for DISPOSABLE).
+IPFS
+Variable
+IMPORTANT
+CIDv1 normalized. health_check() verifies pin via pinning API. Quota exhaustion = immediate demotion.
+
+6.3 Index Snapshot Cross-Backend Hash Verification
+The index snapshot BLAKE3 hash must not be stored on the same backend as the snapshot file. An attacker controlling one backend could replace both the snapshot and its hash simultaneously. Fix: the snapshot hash is signed with the Master Key (HMAC-SHA512) and stored on a different backend from the snapshot file, or embedded in the Chunk 0 manifest of a sentinel file. On restore, the hash is retrieved from the alternate backend and verified before the snapshot is decrypted.
+
+6.4 Routing Policy
+Upload routing: N highest-priority healthy backends (N = tier redundancy level). Priority: health score, historical speed (from upload_history table), quota remaining, tier eligibility (ml_artifacts_only, max tier, cpu_intensive vs current CPU load), hot vs cold. R2 reserved as metadata edge cache. Mega deprioritized when CPU utilization exceeds 70% threshold.
+Download routing: fastest historically reliable backend first. Automatic fallback. DNS-based CDN backends (GitHub): 404 on existence check triggers one retry after 5 s delay before treating as genuine missing chunk (CDN replication lag).
+
+
+7. Redundancy and Reliability
+7.1 Redundancy Tiers
+Tier
+Use Case
+Min Backends
+Verify Freq.
+Alert Threshold
+CRITICAL
+Family photos, personal docs
+4
+48 h leaky bucket
+3 backends
+IMPORTANT
+ML checkpoints, datasets
+3
+Weekly leaky bucket
+2 backends
+DISPOSABLE
+Temp files, experiments
+2
+None
+1 backend
+CRITICAL restore verification: quarterly (not excluded - previous spec excluded CRITICAL files from automated restore tests, which was incorrect). IMPORTANT: monthly. Non-Critical: monthly. All: silent download + decrypt + BLAKE3 verify. Results logged to integrity_log and telemetry panel.
+
+7.2 Chunk 0 Special Replication
+Chunk 0 contains the complete file manifest (total chunk count, all BLAKE3 hashes, UUIDs, file metadata). If Chunk 0 is lost, the file is unrecoverable even if all other chunks are intact. Chunk 0 receives special treatment:
+• Replicated to ALL active backends regardless of tier redundancy level.
+• is_manifest flag in the chunks table identifies Chunk 0 records.
+• Routing policy applies all-backends replication for is_manifest=true chunks.
+• Chunk 0 integrity verified at every health check cycle, not on the leaky bucket schedule.
+• Chunk 0 manifest re-uploaded when any subsequent chunk hash changes (format migration, re-encryption).
+
+7.3 Corrupted Chunk Auto-Recovery
+During file reassembly, if a chunk's Poly1305 authentication fails on one backend: (1) the app immediately tries the same chunk from the next-priority backend (automatic, no user action); (2) if all backends fail for the same chunk, the user is alerted with the specific chunk index and file name; (3) the chunk is flagged for emergency healing; (4) no partial decrypted data is ever returned to the application before full chunk authentication passes.
+
+7.4 Alert Hierarchy
+• 4+ backends healthy - silent.
+• 3 backends healthy - passive status bar notice.
+• 2 backends healthy - persistent banner every app open. Emergency Cross-Mirroring offered.
+• 1 backend healthy - full-screen blocking modal. [Mirror Now] [Add Backend] only dismissible actions.
+• 0 backends - read-only emergency mode. Thumbnails and index accessible locally.
+
+7.5 Lazy Polling - No Startup Storm
+On startup: ZERO network calls for chunk verification. Health states read from SQLite cache only. Background health daemon uses leaky bucket: randomised 1% daily chunk sample per backend. Full sweep: manual only. DNS CDN backends (GitHub): 404 triggers retry before treating as missing. Prevents IP-level rate-limit bans from simultaneous HEAD requests to 10 backends on launch.
+
+7.6 Healing Trickle Queue - No Thundering Herd
+Healing daemon: isolated low-priority background queue. Randomised exponential backoff. Pauses on foreground upload. Max 1 healing chunk per backend concurrently. Configurable healing rate (default: conservative). A 50 GB backend failure does not cascade into a DDoS against surviving backends.
+
+7.7 Emergency Cross-Mirroring
+At 2 active backends: streams chunks from surviving backends directly to a newly added backend. No local disk buffering. No requirement for local free space. Total storage exhaustion detection: when sum(quota_used) approaches sum(quota_limit) across all backends, a proactive alert recommends adding new backends or upgrading tiers before the crisis point.
+
+7.8 DISPOSABLE Tier Cleanup
+DISPOSABLE tier files deleted from the index have their backend chunks deleted immediately, not after a 30-day tombstone wait. DISPOSABLE data is explicitly marked as not worth preserving. Immediate deletion prevents quota consumption by abandoned experiments on quota-limited backends (B2, R2, Storj).
+
+7.9 Kaggle/Colab CLI Companion
+Single-file Python script (~200 lines). Key handoff: the CLI does not use the Master Key directly. At session setup (one-time from desktop), a scoped session key is derived: HKDF(Master_Key, info="sloth-cli-session-v1", salt=session_salt). The session key is time-limited (default: 30 days) and stored in the Colab/Kaggle environment secret store. If the session key is compromised, only data uploaded during that session window is at risk - the Master Key and all other data remain safe.
+JSON sync format includes: schema_version, array of file records (UUIDv4, BLAKE3+size for dedup check), array of chunk_location records, errors array (chunk_ids that failed per backend), Lamport logical_clock per record. Desktop upserts on import, detects duplicates via BLAKE3+size, resolves conflicts via highest logical_clock. Colab session timeout handling: two-phase commit pending records in JSON are imported as pending and resolved on desktop.
+
+
+8. SQLite Index
+8.1 Three-Tier Database Split
+Tier
+Type
+Purpose
+Tier 1 — ghostdrive.db
+SQLCipher, synced to backends
+Contains everything meaningful that must survive device loss. This includes: file metadata, chunk records, chunk_locations, backend mappings, Lamport clocks, thumbnails (as blobs), upload_history, integrity_log. This is the single source of truth across devices.
+Tier 2 — ghostdrive_search.fts
+Local only, never synced
+FTS5 full-text search index only. Fully rebuildable from ghostdrive.db at any time. Explicitly documented as a local performance cache, not a source of truth.
+Tier 3 — ghostdrive_cache/ directory
+Local only, never synced, throwaway
+Contains: WAL file, LRU block cache, temporary chunk buffers, and any other local scratch data. Can be deleted without data loss. Explicitly documented as such.
+
+8.2 Schema Overview (ghostdrive.db)
+Table
+Key Columns
+files
+id (UUIDv4), name, path, size, mime_type, tier, created_at, version, version_of (parent UUIDv4), tombstone, tombstone_at, logical_clock
+chunks
+id (UUIDv4), file_id, chunk_index, total_chunks, blake3_hash, size, nonce_counter, sub_block_count, is_manifest (bool), ref_count
+chunk_locations
+chunk_id, sub_block_index, backend_id, reference_id, url_type, upload_date, last_verified, status, quota_reserved
+backends
+id (UUIDv4), type, credentials_ref, status, priority, last_health_check, quota_used, quota_limit, quota_reserved, ml_artifacts_only, cpu_intensive, satellite (Storj), deprecated_at
+upload_history
+id, backend_id, chunk_id, timestamp, bytes_transferred, duration_ms, success
+contacts
+id (UUIDv4), nickname, public_key, fingerprint, added_date, trust_level
+shares
+id (UUIDv4), contact_id, file_id, reference_id, status, expiry, created_date, downloaded_at, download_limit, download_count
+sharing_audit_log
+id (UUIDv4), share_id, event_type, timestamp, hmac_chain - append-only, HMAC-chained
+index_snapshots
+id (UUIDv4), snapshot_at, blake3_hash, hash_backend_id (different from snapshot backend), wal_checkpointed
+integrity_log
+id (UUIDv4), chunk_id, checked_at, result, backend_id - pruned to last 10 results per chunk_id
+All PKs are UUIDv4. Sequential integers not used. Version history: new upload of same file creates new row with incremented version and version_of pointing to parent. Old version chunks retained until explicitly deleted. File versioning UI shows history across renames via version_of chain.
+
+8.3 Lamport Clock Atomicity
+logical_clock increment and the operation it timestamps are in the same SQLite transaction. Batch operations (move folder of 200 files) share the same logical_clock value with a secondary sequence number (batch_seq) within the batch. Merge rule: highest logical_clock wins for metadata conflicts. Equal clock: highest batch_seq wins. Clock value stored in index_snapshots manifest and validated on cold-start restore.
+
+8.4 WAL Checkpoint Protocol
+Before any index snapshot: PRAGMA wal_checkpoint(TRUNCATE) executed. WAL checkpoint and snapshot copy are logged to telemetry panel. The logical_clock increment and WAL checkpoint are in the same transaction for clock-sensitive operations.
+
+8.5 Tombstone Vacuum Protocol
+30-day TTL for CRITICAL and IMPORTANT tombstones. DISPOSABLE: immediate deletion. Nightly vacuum procedure: (1) UPDATE sensitive columns (name, path, MIME type, timestamps, thumbnail blob) with random bytes; (2) DELETE row; (3) purge corresponding FTS5 entries from ghostdrive_search.fts; (4) decrement ref_count for chunk references, issue backend delete() for zero-ref chunks; (5) PRAGMA secure_delete=ON + VACUUM; (6) record vacuum event in HMAC ledger. Limitation: pre-vacuum index snapshots on backends retain tombstone data.
+
+8.6 Index Bootstrap - Cold Start Recovery
+On fresh install: check all configured backends for index snapshot at deterministic path (derived from Master Key fingerprint via HKDF). Snapshot hash retrieved from a DIFFERENT backend than the snapshot file (cross-backend hash verification). HMAC-SHA512 signature verified against Master Key before decryption. If hash verification fails: snapshot rejected, try next backend. This prevents a compromised backend from serving a tampered snapshot.
+During index bootstrap (may take minutes for large indexes): GUI shows skeleton loading state with progress indicator. Search disabled. All other operations (adding backends, viewing help) remain available.
+
+8.7 integrity_log Pruning
+integrity_log retains last 10 verification results per chunk_id. Older entries deleted automatically during nightly maintenance. The synced ghostdrive.db is bounded in size. Thumbnails contribute approximately 12 KB per file on average. At 10,000 files this is approximately 120 MB total — a one-time ceiling reached only when files stop being added, not an unbounded growth problem. Upload history and integrity_log are bounded by existing pruning mechanisms already defined in the spec. The only unbounded local data is the LRU block cache, which lives in ghostdrive_cache/ and is never synced.
+
+8.8 Multi-Device Sync Protocol
+After every write to ghostdrive.db, the application pushes an encrypted snapshot of the database to the primary backend at a deterministic path derived from a BLAKE3 hash of the Master Key fingerprint. The snapshot is encrypted with the same Master Key using AES-256-GCM.
+
+On application launch, the app compares the local Lamport clock against the Lamport clock embedded in the remote snapshot. If the remote clock is higher, the app pulls the snapshot and performs a merge using the existing Lamport clock upsert logic. Conflicting records resolve by highest Lamport clock wins. This requires no central server — the primary backend acts as the sync relay.
+
+On a new device, first-launch recovery flow is:
+Step 1 — User selects "Restore existing vault."
+Step 2 — User provides backend credentials (Telegram bot token, GitHub token, etc.).
+Step 3 — App locates the DB snapshot on the primary backend automatically using the deterministic path.
+Step 4 — User enters passphrase.
+Step 5 — App decrypts and loads snapshot, verifies integrity, and is fully operational.
+
+The app must prompt the user to verify this recovery flow works before allowing any uploads. This replaces the verification step that was previously required at first launch.
+
+
+9. GUI Design
+9.1 Views
+• Grid view: thumbnail cards, tier dot (red/yellow/grey), redundancy badge (n/N), healing-in-progress indicator (distinct from data-loss indicator).
+• List view: name, size, date, tier, backends health dots, version count, actions.
+• Detail panel: full metadata, per-backend sub-block status, redundancy bar, share, pin, version history across renames (via version_of chain), ref_count visibility.
+
+9.2 Upload
+• Pre-flight connectivity test on first-ever upload: 1 KB test chunk to each configured backend, verified, deleted. Ensures setup is correct before committing real data.
+• Drag-and-drop zone. Tier suggestion based on file type (photos ? CRITICAL suggested).
+• Duplicate detection during upload: if BLAKE3+size matches existing file, prompt user before uploading (save bandwidth).
+• Per-file and per-backend sub-block progress bars. Retry indicator ("Retrying sub-block 37/38") visible during backoff - not a frozen progress bar.
+• Queue: pause, reorder, cancel per file. Cancel triggers full cleanup flow (Section 5.7).
+• Bandwidth throttle slider for upload AND download. Essential for ISP FUP compliance.
+
+9.3 Telemetry / Logs Panel (Built Month 3)
+Persistent collapsible panel. Real-time log stream with severity levels (DEBUG/INFO/WARN/ERROR). Per-chunk and per-sub-block state transitions. Raw API response codes (sanitized - see Section 9.7). Current BLAKE3 hash. Backend connection status. Healing queue progress. WAL checkpoint events. Filterable by backend, file, severity. Ring buffer: max 10,000 entries in memory. Rolling log file: max 50 MB on disk, then rotated.
+
+9.4 Notification Categories
+Notification fatigue is a real risk with 10 backends and continuous background activity. Categories with independent user controls:
+Category
+Default
+User Control
+Emergency alerts (1 backend remaining)
+Always shown
+Cannot be disabled
+Backend degraded / healing started
+Shown
+Can disable
+Upload completed
+Shown
+Can disable
+Integrity check results
+Daily digest
+Digest or off
+Share received
+Shown
+Can disable
+Index backup completed
+Off
+Can enable
+
+9.5 Clean Shutdown Sequence
+On app close or SIGTERM (including OOM killer): (1) stop accepting new upload tasks; (2) complete current sub-block in progress; (3) drain upload queue (or cancel with cleanup flow); (4) flush in-memory SQLite commit batch; (5) WAL checkpoint; (6) zero key material from ctypes buffers; (7) close SQLCipher connection; (8) exit. This sequence is registered as both a Qt closeEvent handler and a Python signal handler (SIGTERM, SIGINT).
+
+9.6 Exception Handling Philosophy
+No silent exception swallowing anywhere in the upload/download/heal pipeline. Every exception must: (a) retry with backoff if transient network error; (b) mark chunk status as failed and restore quota_reserved if persistent; (c) escalate to telemetry panel as WARN or ERROR. A broad except Exception: pass is a banned pattern in all pipeline code. Code review must verify this before Month 2 ends.
+
+9.7 Log Sanitization Rules
+Raw API responses logged to telemetry panel must be sanitized before logging. Redacted fields: Authorization headers, Bearer tokens, signed URL query parameters (X-Amz-Signature, etc.), Telegram session tokens, account identifiers in error messages. A sanitize_for_log(response) function applies regex-based redaction before any API response reaches the log buffer. Applies to both in-memory telemetry and on-disk encrypted log file.
+
+9.8 Additional UI Features
+• System tray: minimizes to tray, background monitoring continues. Fallback: if system tray unavailable (some Wayland compositors), keep window visible by default.
+• Drag-out: drag file from app to desktop. Fallback if Wayland drag-out fails: "Save to Downloads" button.
+• Folder structure, tagging (in ghostdrive.db only, never FTS5 only).
+• FTS5 search with rebuild trigger. During rebuild: search falls back to direct ghostdrive.db query (slower but functional).
+• Keyboard shortcuts for all primary actions (shortcut map defined in Month 6).
+• Dark and light mode. Window state persistence.
+
+• LRU local block cache: 5 GB configurable. Format version tag - invalidated on chunk format migration.
+• Storage analytics: per-backend, per-tier, per-type, per-month. Historical trends from upload_history table.
+• Tier advisor: "You have 847 files marked CRITICAL. Consider reviewing tier assignments."
+• GhostDrive Trash view: tombstoned files with vacuum countdown per file. Independent of OS trash.
+• Passphrase strength meter: entropy calculation, common-password check, hard block on weak passphrases (below defined entropy threshold). Defined minimum: 60 bits entropy.
+• Encryption benchmark on first run: measures ChaCha20-Poly1305 throughput on local CPU. Warns if below practical threshold for large uploads.
+
+
+10. File Sharing (Phase 2)
+10.1 Trust Model
+Files re-encrypted in memory for recipient using ML-KEM-768 public key. ML-KEM-768 keypair generated at first run (not lazily at share time - avoids timing oracle). Sender Master Key never exposed. Share package is an encrypted blob; only recipient private key opens it.
+
+10.2 Contact Exchange and QR Code
+QR code contents: public key fingerprint (SHA-256 of public key, hex-encoded), app version, preferred rendezvous backend type. QR code does NOT include: private key, Master Key, backend credentials, or personal identifiers beyond the fingerprint. One-time exchange; all subsequent sharing is automatic.
+
+10.3 Rendezvous Backend and Replay Protection
+Share packages uploaded to pre-agreed rendezvous backend. Unknown or expired share packages silently ignored (not logged as errors) - prevents replay attacks from causing user alarm. Bilateral TTL cleanup: both sender and recipient background workers issue delete() for expired packages.
+
+10.4 Sharing Audit Log
+sharing_audit_log table: append-only, HMAC-chained (same ledger pattern as main index). Records: share_created, share_downloaded, share_revoked, share_expired. Provides immutable audit trail for users sharing sensitive ML work. Chain integrity verifiable independently of the main HMAC ledger.
+
+10.5 Share Lifecycle
+• Default TTL: 30 days. Configurable. Expiry timestamp embedded in package.
+• Download limit: configurable (default unlimited).
+• Delivery receipt: sender notified on download.
+• Revocation: delete from rendezvous backend. Cannot undo already-downloaded packages - stated clearly in UI before share is sent.
+• Folder sharing: manifest of files; recipient fetches individually.
+• Trust levels per contact: configurable which tiers a contact may receive.
+
+
+11. Security Threat Model
+What GhostDrive Protects Against
+• Backend provider reading data: impossible - ChaCha20-Poly1305 before leaving machine.
+• Backend account compromise: attacker sees authenticated encrypted blobs only.
+• Third-party downloading chunks: cannot decrypt without Master Key.
+• Chunk reordering/substitution: Poly1305 AAD binding detects.
+• Chunk corruption/bitrot: Poly1305 tag and BLAKE3 hash detect.
+• Index tampering: HMAC-SHA512 ledger chain detects.
+• Passphrase brute force: Argon2id with calibrated parameters.
+•• Timing attacks on secret comparisons: hmac.compare_digest throughout.
+• Replay attacks on rendezvous: expired packages silently ignored.
+• Tampered index snapshot: cross-backend hash verification + HMAC signature.
+• Stale Colab sync overwriting newer data: Lamport clock merge.
+
+What GhostDrive Does NOT Protect Against
+• Malware on local machine with keylogger access to passphrase.
+• Physical access to unlocked machine while app running.
+• OS hibernation file capturing Master Key from RAM (VirtualLock where available; documented where not).
+• Screen recording during file preview.
+• Recovery is performed by importing a previously exported ghostdrive.db snapshot and entering the account passphrase.
+• Pre-vacuum index snapshots on backends: tombstone data survives in pre-vacuum snapshots.
+• Thumbnails in encrypted index: adversary with Master Key and index backup gains thumbnails of all stored files.
+• Archive.org malware scanning: mitigated by DISPOSABLE-only routing.
+• India IT Act Section 69 lawful decryption orders: passphrase is the decryption key. No technical protection against lawful orders.
+• GDPR right to erasure: encrypted ciphertext blobs may persist on backends after local deletion. Whether encrypted-but-unreadable satisfies GDPR Article 17 is a legal grey area. Documented.
+• Network metadata leakage: upload timing and volume patterns are observable without decryption. Healing cascades visible as traffic spikes.
+• iCloud/OneDrive sync of app data directory: if user stores app data in a synced folder, keystore.json metadata leaks to Apple/Microsoft.
+
+User Responsibility Notice
+Use of third-party services as storage backends may violate their Terms of Service. GhostDrive makes no warranty of service continuity. Users assume full responsibility for ToS compliance and applicable law in their jurisdiction. Export of strong encryption software may be subject to export control regulations.
+
+
+12. Development Timeline
+Mo.
+Phase
+Deliverables
+1
+Crypto Core
+Passphrase setup and Argon2id keystore derivation. ChaCha20-Poly1305 (single-tag-per-chunk). Nonce increment before upload (fsync). HKDF salt + info strings. AES-256-GCM wrapping. ctypes key zeroing. hmac.compare_digest throughout. Two-phase commit + quota reservation (atomic). OS file locking abstraction. fsync on critical writes. Unit tests for ALL crypto paths. Exception handling philosophy enforced.
+2
+Chunking + Database
+64 KB generator streaming. Thermal backpressure. 50 MB sub-block layer. BLAKE3+size dedup (pre-compression, fixed level 3). Reference counting. Cancellation flow. ghostdrive.db schema (UUIDv4, WAL, HMAC ledger with genesis seed, SQLCipher). ghostdrive_search.fts schema. WAL checkpoint. Lamport clocks (atomic with ops). Encrypted index backup. Bootstrap recovery (cross-backend hash verification). Commit batching. integrity_log pruning. upload_history table.
+3
+Backend Layer + Telemetry
+BAL plugin interface. Telegram (session expiry detection), GitHub (422 handler), Discord (ephemeral URL), Mega.nz (async-mega-py, cpu_intensive). S3 unified plugin (B2, R2, Storj with satellite lock). Exponential backoff, rate-limit handling, token refresh. Telemetry panel with log sanitization. R2 as metadata edge cache. Credential storage via OS keyring.
+4
+Remaining Backends + CLI
+Hugging Face (Git LFS, empirical backoff), Archive.org (DISPOSABLE, immediate cleanup), IPFS (CIDv1, pin verification). External drive + LAN plugins. Kaggle/Colab CLI (session-derived key, JSON sync with errors array, dedup awareness, schema_version, Colab timeout handling). First-run wizard: test recovery verification step, passphrase strength meter, encryption benchmark, backend setup guides.
+5
+Reliability Systems
+Leaky bucket health daemon. Tiered alerts. Healing trickle queue. Emergency Cross-Mirroring. Proactive integrity verification (CRITICAL: quarterly restore test). Chunk 0 special replication. Corrupted chunk auto-recovery. Tombstone vacuum (FTS5 sync, ref count, DISPOSABLE immediate). OOM SIGTERM handler. Total storage exhaustion detection. Backend deprecation flow. Startup storm prevention.
+6
+GUI Core
+PyQt6 shell. Grid/list/detail views. Upload queue with retry indicators. Pre-flight test. Health dashboard. Thumbnail generation. Image/PDF preview. FTS5 search with fallback. System tray with Wayland fallback. Dark/light mode. Notification categories. LRU cache with format version tag. Tier advisor. GhostDrive Trash view. Windows long path support. inotify limit detection.
+7
+Polish + Operations
+Folder structure, tagging, batch ops. Drag-out with Wayland fallback. Storage analytics with trends. Key rotation. Passphrase change procedure. Schema migration. Settings panel (full inventory). Backend config export/import. Bandwidth throttle (upload + download). Log rotation. Version history UI. Sharing UI groundwork.
+8
+Sharing + Erasure Coding
+ML-KEM-768 keypair (generated at first run). Contacts + QR exchange. Share packages. Rendezvous delivery. Bilateral cleanup. sharing_audit_log. Replay protection. Reed-Solomon (zfec, 4+2 shards) replacing full replication for CRITICAL and IMPORTANT.
+9
+Testing + Hardening
+Crypto unit tests. Dedup correctness across compression levels. Sub-block assembly auth timing. Two-phase commit crash recovery. WAL checkpoint + restore. Chaos testing (kill backends mid-upload/heal, simulate OOM). Large file stress tests (10 GB+). Startup storm verification. Multi-platform packaging (PyInstaller). macOS Gatekeeper documentation. Antivirus false-positive documentation. Fuzzing: chunk header parser, JSON importer, QR fingerprint parser. Mock backend integration test suite.
+10
+Submission
+Bulk export / disaster recovery mode. Final bug fixes. Per-backend setup guides with screenshots (written Month 4, refined here). Threat model document. Project report. Demo video. Author sign-off section. Submission package.
+
+
+13. Technology Stack
+Component
+Library / Tool
+Purpose
+GUI
+PyQt6, qasync
+Desktop interface, async event loop
+Streaming encryption
+cryptography (OpenSSL)
+ChaCha20-Poly1305 (streaming, single tag per chunk), AES-256-GCM (key wrapping)
+Key derivation
+argon2-cffi
+Argon2id, once per session
+Hashing
+blake3 (Rust binding, pinned version)
+Dedup key (pre-compression), chunk integrity
+Credential storage
+keyring (secretstorage/DPAPI/Keychain)
+OS keyring abstraction. Fallback: AES-GCM encrypted file
+Post-quantum
+liboqs Python binding
+ML-KEM-768 keypair, generated at first run
+Compression
+python-zstandard
+zstd level 3 (fixed constant)
+Database Tier 1
+sqlcipher3 (SQLCipher)
+Encrypted ghostdrive.db (synced to backends) - contains file metadata, chunk records, chunk_locations, backend mappings, Lamport clocks, thumbnails, upload_history, integrity_log.
+Database Tier 2
+sqlite3 + FTS5
+Local ghostdrive_search.fts - full-text search index only (never synced, rebuildable cache).
+Database Tier 3
+Local directory / files
+ghostdrive_cache/ directory - contains WAL file, LRU block cache, temporary chunk buffers (local only, never synced, throwaway).
+Async file I/O
+aiofiles
+Non-blocking reads for generator pipeline
+HTTP client
+httpx (async)
+All backends, SOCKS5 proxy, streaming upload, TCP_NODELAY
+Telegram
+Telethon
+MTProto client, flood wait, session expiry detection
+Mega.nz
+async-mega-py / MEGAcmd
+Primary / hardened fallback
+Hugging Face
+huggingface_hub
+Git LFS, empirically calibrated backoff
+S3-compatible
+boto3
+B2, R2, Storj via unified plugin
+IPFS
+ipfshttpclient + pinning API
+CIDv1 normalized, pin status verified
+Erasure coding
+zfec (Phase 2)
+Reed-Solomon 4+2 shards
+Media playback
+python-vlc / FFmpeg fallback
+Streaming video/audio preview
+Thumbnails
+Pillow, pymupdf
+Image thumbnails, PDF first-page preview
+Packaging
+PyInstaller
+Win/Linux/macOS. macOS: Gatekeeper bypass documented
+Dependencies
+Poetry (exact pinning)
+Reproducible builds. blake3 version pinned identically in CLI.
+Testing
+pytest, pytest-asyncio, hypothesis (fuzzing)
+Unit, integration, chaos, fuzz
+
+
+14. Known Risks and Mitigations
+Risk
+Likelihood
+Mitigation
+Poly1305 tag scope error (per-block vs per-chunk)
+Prevented
+Single encryptor instance per chunk. finalize() after last block. Tag verified before any decrypted byte returned.
+Nonce reuse from crash
+Prevented
+Increment before upload + fsync. Wasted nonce acceptable.
+Chunk 0 loss making file unrecoverable
+Low
+Chunk 0 replicated to ALL backends. Verified every health cycle.
+Shared chunk deleted via ref count error
+Prevented
+ref_count checked before every backend delete(). Zero-ref required.
+Dedup hash mismatch across compression levels
+Prevented
+BLAKE3 computed pre-compression on original bytes. zstd level fixed at 3.
+Startup storm rate-limit bans
+Prevented
+Zero network calls on startup. Leaky bucket background verification.
+Thundering herd healing cascade
+Prevented
+Isolated trickle queue, randomised backoff, 1 chunk/backend concurrency.
+Colab sync split-brain (causality loss)
+Prevented
+Lamport clocks, highest-clock-wins merge, batch_seq for atomic batches.
+Quota billing event on S3 backends
+Prevented
+Hard quota cap. Quota reservation atomic check before upload.
+Discord CDN URL expiry
+Prevented
+Store message_id+channel_id. Fresh URL fetched at download time.
+GitHub 422 on duplicate filename
+Handled
+Plugin detects 422, deletes partial asset, retries.
+Storj multi-satellite data split
+Prevented
+Satellite locked at first upload. Plugin refuses config change.
+IPFS garbage collection
+Prevented
+health_check() verifies pin via pinning API. Quota exhaustion demotes backend.
+Archive.org malware scanner
+Prevented
+DISPOSABLE only. Immediate cleanup on deletion.
+Mega.nz double-encryption CPU tax
+Managed
+cpu_intensive flag. Deprioritized above 70% CPU. Voluntary sleep between sub-blocks.
+Telegram session expiry
+Detected
+Distinct error detection. Manual reauth alert (not generic auth error).
+Thermal throttling stalling upload
+Handled
+Backpressure: encryption output gates network send rate.
+OOM killer terminating app
+Handled
+SIGTERM handler: emergency cleanup, WAL flush, key zero, exit.
+Index snapshot tampered on backend
+Prevented
+Hash stored on different backend + HMAC-signed with Master Key.
+Telemetry panel leaking auth tokens
+Prevented
+sanitize_for_log() redacts all credential fields before logging.
+SSD TBW wear
+Low (gradual use)
+Generator pipeline eliminates temp writes. Commit batching reduces WAL thrash.
+ISP FUP throttling
+Medium
+Bandwidth throttle slider (upload + download). Reed-Solomon reduces overhead to 1.5x.
+PyInstaller antivirus (Windows)
+High
+Whitelist documentation. Code-signing for public release.
+macOS Gatekeeper block
+High
+Right-click Open bypass documented. Developer ID notarization for release.
+
+
+15. Success Criteria
+All of the following must be demonstrated before submission:
+• 10 GB file uploaded across 4 backends simultaneously, retrieved with byte-perfect integrity.
+• Killing 2 of 4 backends mid-download does not cause retrieval failure.
+• Corrupted chunk (auth tag failure) on one backend: automatic fallback to next backend, no user action required.
+• Dropping to 2 backends triggers persistent alert and Emergency Cross-Mirroring offer.
+• Recovery is performed by importing a previously exported ghostdrive.db snapshot and entering the account passphrase.
+• CRITICAL tier photo verified on 4+ distinct backends. Chunk 0 verified on ALL backends.
+• Kaggle CLI uploads checkpoint directly; desktop GUI imports JSON sync without double-transfer.
+• Startup with 1000+ files: zero network calls confirmed via telemetry panel.
+• Discord backend mid-session: ephemeral URL refresh successful, no download failure.
+• Tombstone vacuum: sensitive columns overwritten, FTS5 entries purged, PRAGMA secure_delete + VACUUM confirmed.
+• Two concurrent uploads of same file: deduplication lock prevents double-upload.
+• Sub-block retry during large upload: progress bar shows retry indicator, not frozen bar.
+• Pre-flight test on first upload: 1 KB test chunk verified and deleted on each backend.
+• hmac.compare_digest used for all secret comparisons: verified by code review.
+• Exception handling audit: no silent except pass in any pipeline path.
+
+16. Appendix A - Competing Projects Comparison
+Feature
+GhostDrive
+Telegram-Drive
+D-Drive
+YouTubeDrive
+Rclone Crypt
+Client-side encryption
+Yes (ChaCha20)
+No
+No
+No
+Yes
+Single-tag-per-chunk auth
+Yes
+N/A
+N/A
+N/A
+Varies
+Multi-backend (10 backends)
+Yes
+No
+No
+No
+Config only
+Tiered redundancy
+Yes
+No
+No
+No
+No
+Generator streaming
+Yes (64 KB)
+No
+No
+No
+No
+Snapshot-based recovery
+Yes
+No
+No
+No
+No
+Lamport clock sync
+Yes
+No
+No
+No
+No
+Ref-counted dedup
+Yes
+No
+No
+No
+No
+Polished PyQt6 GUI
+Yes
+Tauri/React
+Basic
+None
+None
+Telemetry panel
+Yes
+No
+No
+No
+No
+Kaggle CLI + JSON sync
+Yes
+No
+No
+No
+CLI only
+Erasure coding (Phase 2)
+Planned
+No
+No
+No
+No
+Post-quantum sharing
+Phase 2
+No
+No
+No
+No
+
+17. Appendix B - Version History
+Version
+Key Changes
+v1.0
+Initial specification. 16 sections. Core architecture established: ChaCha20-Poly1305, passphrase-derived keys, multi-backend BAL, tiered redundancy, PyQt6 GUI, Kaggle CLI.
+v1.1
+Post-review hardening (5 rounds). Added: Discord ephemeral URL handling, Archive.org demotion to DISPOSABLE, IPFS pin verification, Hugging Face ml_artifacts_only, R2 metadata cache, lazy polling, healing trickle queue, Emergency Cross-Mirroring, Reed-Solomon (Phase 2), split database, UUIDv4 PKs, WAL checkpoint, tombstone vacuum, telemetry panel, LRU cache, bilateral share cleanup, JSON CLI sync.
+v1.2
+Final hardening (7 rounds total). Critical fixes: Poly1305 single-tag-per-chunk, nonce increment before upload, OS file locking replacing pre-hash double-read, constant-time comparisons, HKDF salt and info strings defined, test recovery verification step, clean shutdown sequence, exception handling philosophy, CLI session-derived key handoff, Lamport clock atomicity, reference counting, FTS5 vacuum on tombstone, Chunk 0 special replication, credential storage via OS keyring, quota reservation race fix, log sanitization, cross-backend index snapshot hash, corrupted chunk auto-recovery, thermal backpressure, OOM SIGTERM handler, fsync on critical writes, pre-flight test, notification categories, passphrase change procedure, bulk export mode, sharing audit log, DISPOSABLE immediate cleanup, GitHub 422 handler, Storj satellite lock, Mega cpu_intensive routing, dedup pre-compression hash, zstd level fixed constant, sub-block assembly authentication constraint, HMAC genesis seed defined, integrity_log pruning.
+
+Document ends. Version 1.2 - June 2026. Seven rounds of adversarial technical review. Architecture held intact throughout; all changes are implementation precision fixes.
+GhostDrive   -   Project Specification v1.2
+
+Anand K S   |   BCA Final Year Project 2026-27   |   GhostDrive v1.2
+
