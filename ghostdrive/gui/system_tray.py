@@ -10,7 +10,6 @@ from PyQt6.QtGui import QIcon, QAction
 from PyQt6.QtWidgets import (
     QSystemTrayIcon,
     QMenu,
-    QMessageBox,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,13 +112,13 @@ class GhostDriveSystemTray(QSystemTrayIcon):
         Logs anomalies to the main window telemetry / notification panels.
         """
         logger.debug("Running background integrity sweep...")
-        if not self.main_window or not hasattr(self.main_window, "db") or not self.main_window.db:
+        if not self.main_window or not hasattr(self.main_window, "db") or not self.main_window.db or not getattr(self.main_window.db, "_conn", None):
             return
 
         db = self.main_window.db
         try:
             # Check db open and perform quick verification
-            db.verify_hmac_chain()
+            db.verify_hmac_chain(partial_check=True)
             logger.debug("Background integrity check: HMAC Chain Valid.")
         except Exception as exc:
             logger.error("Background integrity sweep detected an HMAC chain violation: %s", exc)

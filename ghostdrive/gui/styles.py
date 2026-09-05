@@ -2,7 +2,11 @@
 styles.py -- QSS Stylesheets and theme definitions for GhostDrive.
 """
 
+import re
 from typing import Dict
+
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QWidget, QLayout, QTableWidget, QDialog
 
 # Curated palettes
 THEME_PALETTES: Dict[str, Dict[str, str]] = {
@@ -37,18 +41,60 @@ THEME_PALETTES: Dict[str, Dict[str, str]] = {
 }
 
 
+def adjust_hex_color(hex_str: str, factor: float) -> str:
+    """Adjust the brightness of a hex color. factor > 1.0 lightens, < 1.0 darkens."""
+    hex_str = hex_str.lstrip('#')
+    if len(hex_str) != 6:
+        return f"#{hex_str}"
+    try:
+        r = int(hex_str[0:2], 16)
+        g = int(hex_str[2:4], 16)
+        b = int(hex_str[4:6], 16)
+        
+        # Adjust brightness
+        r = min(255, max(0, int(r * factor)))
+        g = min(255, max(0, int(g * factor)))
+        b = min(255, max(0, int(b * factor)))
+        
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return f"#{hex_str}"
+
+
+def hex_to_rgba(hex_str: str, alpha: float) -> str:
+    """Convert hex color to rgba string with specified alpha."""
+    hex_str = hex_str.lstrip('#')
+    if len(hex_str) != 6:
+        return f"rgba(139, 92, 246, {alpha})"
+    try:
+        r = int(hex_str[0:2], 16)
+        g = int(hex_str[2:4], 16)
+        b = int(hex_str[4:6], 16)
+        return f"rgba({r}, {g}, {b}, {alpha})"
+    except Exception:
+        return f"rgba(139, 92, 246, {alpha})"
+
+
 def get_stylesheet(theme: str = "dark", accent_color: str = None) -> str:
     """Return the global QSS stylesheet for the selected theme and custom accent."""
     palette = THEME_PALETTES.get(theme, THEME_PALETTES["dark"]).copy()
     if accent_color:
         palette["accent_primary"] = accent_color
     
+    accent = palette["accent_primary"]
+    # Compute dynamic gradient stops, shadows, and highlights based on the active accent color
+    accent_dark = adjust_hex_color(accent, 0.78)
+    accent_light = adjust_hex_color(accent, 1.22)
+    accent_rgba_15 = hex_to_rgba(accent, 0.15)
+    accent_rgba_10 = hex_to_rgba(accent, 0.10)
+    secondary_rgba_12 = hex_to_rgba(palette['accent_secondary'], 0.12)
+    
     qss = f"""
     /* Global Settings */
     QWidget {{
         background-color: {palette['bg_main']};
         color: {palette['text_main']};
-        font-family: "Segoe UI", -apple-system, Roboto, Helvetica, Arial, sans-serif;
+        font-family: "Plus Jakarta Sans", "Inter", "Segoe UI", -apple-system, Roboto, Helvetica, Arial, sans-serif;
         font-size: 13px;
     }}
     
@@ -58,14 +104,15 @@ def get_stylesheet(theme: str = "dark", accent_color: str = None) -> str:
     }}
     
     QFrame#GlassCard {{
-        background-color: {palette['bg_card']};
-        border: 1px solid {palette['border']};
-        border-radius: 8px;
+        background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {palette['bg_card']}, stop:1 {palette['bg_input']});
+        border: 1.5px solid {palette['border']};
+        border-radius: 12px;
     }}
     
     QFrame#Sidebar {{
-        background-color: {palette['bg_card']};
-        border-right: 1px solid {palette['border']};
+        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {palette['bg_card']}, stop:1 {palette['bg_main']});
+        border: none;
+        border-right: 1.5px solid {palette['border']};
     }}
     
     /* Labels */
@@ -74,146 +121,235 @@ def get_stylesheet(theme: str = "dark", accent_color: str = None) -> str:
     }}
     
     QLabel#Heading {{
-        font-size: 18px;
-        font-weight: bold;
+        font-size: 20px;
+        font-weight: 800;
+        letter-spacing: 0.5px;
         color: {palette['text_main']};
     }}
     
     QLabel#SubHeading {{
         font-size: 14px;
-        font-weight: 500;
-        color: {palette['text_muted']};
+        font-weight: 600;
+        letter-spacing: 0.25px;
+        color: {accent};
     }}
     
     QLabel#MutedLabel {{
         color: {palette['text_muted']};
         font-size: 11px;
+        font-weight: 400;
     }}
     
     /* Inputs */
-    QLineEdit, QTextEdit {{
+    QLineEdit, StyledLineEdit, PasswordLineEdit, QTextEdit {{
         background-color: {palette['bg_input']};
         color: {palette['text_main']};
         border: 1px solid {palette['border']};
-        border-radius: 6px;
-        padding: 8px 12px;
+        border-radius: 8px;
+        padding: 10px 14px;
     }}
     
-    QLineEdit:focus, QTextEdit:focus {{
-        border: 1.5px solid {palette['accent_primary']};
+    QLineEdit:hover, StyledLineEdit:hover, PasswordLineEdit:hover, QTextEdit:hover {{
+        border: 1px solid {palette['text_muted']};
+    }}
+    
+    QLineEdit:focus, StyledLineEdit:focus, PasswordLineEdit:focus, QTextEdit:focus {{
+        border: 1.5px solid {accent};
+        background-color: {palette['bg_card']};
     }}
     
     PasswordLineEdit {{
-        padding-right: 30px;
+        padding-right: 36px;
+    }}
+    
+    /* Comboboxes */
+    QComboBox, StyledComboBox {{
+        background-color: {palette['bg_input']};
+        color: {palette['text_main']};
+        border: 1px solid {palette['border']};
+        border-radius: 8px;
+        padding: 8px 12px;
+        min-width: 100px;
+    }}
+    
+    QComboBox:hover, StyledComboBox:hover {{
+        border: 1px solid {palette['text_muted']};
+    }}
+    
+    QComboBox:focus, StyledComboBox:focus {{
+        border: 1.5px solid {accent};
+    }}
+    
+    QComboBox::drop-down, StyledComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 30px;
+        border-left: none;
+    }}
+    
+    QComboBox QAbstractItemView, QComboBox QListView,
+    StyledComboBox QAbstractItemView, StyledComboBox QListView {{
+        background-color: {palette['bg_card']};
+        color: {palette['text_main']};
+        border: 1.5px solid {palette['border']};
+        border-radius: 8px;
+        selection-background-color: {palette['bg_hover']};
+        selection-color: {accent};
+        outline: none;
+    }}
+    
+    QComboBox QAbstractItemView::item, QComboBox QListView::item,
+    StyledComboBox QAbstractItemView::item, StyledComboBox QListView::item {{
+        background-color: {palette['bg_card']};
+        color: {palette['text_main']};
+        padding: 8px 12px;
+    }}
+    
+    QComboBox QAbstractItemView::item:hover, QComboBox QAbstractItemView::item:selected,
+    QComboBox QListView::item:hover, QComboBox QListView::item:selected,
+    StyledComboBox QAbstractItemView::item:hover, StyledComboBox QAbstractItemView::item:selected,
+    StyledComboBox QListView::item:hover, StyledComboBox QListView::item:selected {{
+        background-color: {palette['bg_hover']};
+        color: {accent};
+    }}
+    
+    /* Checkboxes & Radio Buttons */
+    QCheckBox {{
+        spacing: 8px;
+        background-color: transparent;
+    }}
+    
+    QCheckBox::indicator {{
+        width: 18px;
+        height: 18px;
+        border: 1.5px solid {palette['border']};
+        border-radius: 5px;
+        background-color: {palette['bg_input']};
+    }}
+    
+    QCheckBox::indicator:hover {{
+        border-color: {palette['text_muted']};
+    }}
+    
+    QCheckBox::indicator:checked {{
+        background-color: {accent};
+        border-color: {accent};
     }}
     
     /* Buttons */
     QPushButton {{
-        background-color: {palette['bg_card']};
-        border: 1px solid {palette['border']};
-        border-radius: 6px;
-        padding: 8px 16px;
-        font-weight: 500;
+        background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {palette['bg_input']}, stop:1 {palette['bg_card']});
+        border: 1.5px solid {palette['border']};
+        border-radius: 8px;
+        padding: 9px 16px;
+        font-weight: 600;
+        font-size: 12px;
     }}
     
     QPushButton:hover {{
         background-color: {palette['bg_hover']};
-        border-color: {palette['text_muted']};
+        border-color: {accent};
     }}
     
     QPushButton:pressed {{
         background-color: {palette['border']};
     }}
     
-    QPushButton#PrimaryButton {{
-        background-color: {palette['accent_primary']};
+    QPushButton[theme="primary"], QPushButton#PrimaryButton {{
+        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {accent}, stop:1 {accent_dark});
         color: #ffffff;
         border: none;
     }}
     
-    QPushButton#PrimaryButton:hover {{
-        background-color: #7c3aed;  /* Darker violet */
+    QPushButton[theme="primary"]:hover, QPushButton#PrimaryButton:hover {{
+        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {accent_light}, stop:1 {accent});
     }}
     
-    QPushButton#SecondaryButton {{
+    QPushButton[theme="secondary"], QPushButton#SecondaryButton {{
         background-color: transparent;
         color: {palette['accent_secondary']};
-        border: 1px solid {palette['accent_secondary']};
+        border: 1.5px solid {palette['accent_secondary']};
     }}
     
-    QPushButton#SecondaryButton:hover {{
-        background-color: rgba(6, 182, 212, 0.1);
+    QPushButton[theme="secondary"]:hover, QPushButton#SecondaryButton:hover {{
+        background-color: {secondary_rgba_12};
+        border-color: {palette['accent_secondary']};
     }}
     
-    QPushButton#DangerButton {{
-        background-color: {palette['status_error']};
+    QPushButton[theme="danger"], QPushButton#DangerButton {{
+        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {palette['status_error']}, stop:1 #b91c1c);
         color: #ffffff;
         border: none;
     }}
     
-    QPushButton#DangerButton:hover {{
-        background-color: #dc2626;
+    QPushButton[theme="danger"]:hover, QPushButton#DangerButton:hover {{
+        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f87171, stop:1 {palette['status_error']});
     }}
     
-    /* Navigation Sidebar Items */
-    QListWidget#NavList {{
+    /* Navigation Sidebar Items (Buttons) */
+    QPushButton[navBtn="true"] {{
         background-color: transparent;
         border: none;
-        outline: none;
-    }}
-    
-    QListWidget#NavList::item {{
-        background-color: transparent;
-        border-radius: 6px;
-        padding: 10px 15px;
-        margin-bottom: 4px;
+        border-radius: 10px;
+        min-height: 50px;
+        padding: 0px 12px;
+        text-align: left;
         color: {palette['text_muted']};
+        font-weight: 600;
+        font-size: 18px;
     }}
     
-    QListWidget#NavList::item:hover {{
-        background-color: {palette['bg_hover']};
+    QPushButton[navBtn="true"]:hover {{
+        background-color: rgba(255, 255, 255, 0.03);
         color: {palette['text_main']};
     }}
     
-    QListWidget#NavList::item:selected {{
-        background-color: rgba(139, 92, 246, 0.15); /* Muted violet overlay */
-        color: {palette['accent_primary']};
+    QPushButton[navBtn="true"]:checked {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {accent_rgba_15}, stop:1 transparent);
+        color: {accent};
+        border-left: 3px solid {accent};
         font-weight: bold;
     }}
     
     /* Lists and Tables */
     QTableWidget, QListWidget {{
         background-color: {palette['bg_card']};
-        border: 1px solid {palette['border']};
-        border-radius: 8px;
+        border: 1.5px solid {palette['border']};
+        border-radius: 12px;
+        gridline-color: {palette['border']};
         outline: none;
     }}
     
     QTableWidget::item, QListWidget::item {{
-        padding: 8px;
+        padding: 10px;
+        border-bottom: 1px solid {palette['border']};
+    }}
+    
+    QTableWidget::item:selected, QListWidget::item:selected {{
+        background-color: {accent_rgba_10};
+        color: {palette['text_main']};
     }}
     
     QHeaderView::section {{
         background-color: {palette['bg_input']};
         color: {palette['text_muted']};
-        padding: 8px;
         border: none;
-        border-bottom: 1px solid {palette['border']};
-        font-weight: bold;
+        border-bottom: 1.5px solid {palette['border']};
+        font-weight: 700;
+        font-size: 11px;
     }}
     
     /* Scrollbars */
     QScrollBar:vertical {{
-        border: none;
-        background-color: transparent;
-        width: 10px;
+        background: transparent;
+        width: 8px;
         margin: 0px;
     }}
     
     QScrollBar::handle:vertical {{
         background-color: {palette['border']};
         min-height: 20px;
-        border-radius: 5px;
+        border-radius: 4px;
     }}
     
     QScrollBar::handle:vertical:hover {{
@@ -223,36 +359,48 @@ def get_stylesheet(theme: str = "dark", accent_color: str = None) -> str:
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         border: none;
         background: none;
+        height: 0px;
+        width: 0px;
+    }}
+    
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+        background: none;
     }}
     
     QScrollBar:horizontal {{
-        border: none;
-        background-color: transparent;
-        height: 10px;
+        background: transparent;
+        height: 8px;
         margin: 0px;
     }}
     
     QScrollBar::handle:horizontal {{
         background-color: {palette['border']};
         min-width: 20px;
-        border-radius: 5px;
+        border-radius: 4px;
     }}
     
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
         border: none;
+        background: none;
+        height: 0px;
+        width: 0px;
+    }}
+    
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
         background: none;
     }}
     
     /* Tab Headers */
     QTabBar::tab {{
         background-color: {palette['bg_card']};
-        border: 1px solid {palette['border']};
+        border: 1.5px solid {palette['border']};
         border-bottom-color: transparent;
-        border-top-left-radius: 6px;
-        border-top-right-radius: 6px;
-        padding: 8px 16px;
-        margin-right: 2px;
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+        padding: 10px 20px;
+        margin-right: 4px;
         color: {palette['text_muted']};
+        font-weight: 600;
     }}
     
     QTabBar::tab:hover {{
@@ -263,39 +411,38 @@ def get_stylesheet(theme: str = "dark", accent_color: str = None) -> str:
         background-color: {palette['bg_main']};
         border-color: {palette['border']};
         border-bottom-color: {palette['bg_main']};
-        color: {palette['accent_primary']};
-        font-weight: bold;
+        color: {accent};
+        font-weight: 700;
     }}
     
     /* Progress Bars */
     QProgressBar {{
         background-color: {palette['bg_input']};
-        border: 1px solid {palette['border']};
-        border-radius: 6px;
+        border: 1.5px solid {palette['border']};
+        border-radius: 8px;
         text-align: center;
-        font-weight: bold;
+        font-weight: 700;
+        color: {palette['text_main']};
     }}
     
     QProgressBar::chunk {{
-        background-color: {palette['accent_primary']};
-        border-radius: 5px;
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {accent}, stop:1 {palette['accent_secondary']});
+        border-radius: 6px;
     }}
     
     /* Tooltips */
     QToolTip {{
         background-color: {palette['bg_card']};
         color: {palette['text_main']};
-        border: 1px solid {palette['border']};
-        border-radius: 4px;
-        padding: 4px;
+        border: 1.5px solid {palette['border']};
+        border-radius: 6px;
+        padding: 6px;
     }}
     """
     return qss
 
 
-import re
-from PyQt6.QtCore import QTimer, QSize
-from PyQt6.QtWidgets import QWidget, QLayout, QTableWidget, QDialog
+
 
 def scale_qss(qss: str, scale_factor: float) -> str:
     """Scale all px values in a QSS string by scale_factor."""
@@ -317,18 +464,18 @@ def get_widget_layout(widget: QWidget):
     try:
         prop = getattr(QWidget, "layout", None)
         if prop and hasattr(prop, "fget"):
-            l = prop.fget(widget)
-            if l is not None:
-                return l
+            layout_obj = prop.fget(widget)
+            if layout_obj is not None:
+                return layout_obj
     except Exception:
         pass
-    l = getattr(widget, "layout", None)
-    if l is not None:
-        if isinstance(l, QLayout):
-            return l
-        if callable(l):
+    layout_obj = getattr(widget, "layout", None)
+    if layout_obj is not None:
+        if isinstance(layout_obj, QLayout):
+            return layout_obj
+        if callable(layout_obj):
             try:
-                res = l()
+                res = layout_obj()
                 if isinstance(res, QLayout):
                     return res
             except Exception:

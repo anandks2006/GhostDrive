@@ -1,20 +1,5 @@
 """
 fsync.py — Atomic file writes with fsync for all critical GhostDrive state.
-
-Spec §5.1 / §9.5 — "fsync on critical writes"
-===============================================
-Critical files (keystore.json, nonce_counter.json, WAL checkpoint marker,
-index snapshot) MUST be written atomically with fsync so that a power loss or
-OS crash never leaves a partial write.
-
-``atomic_write()`` implements the write-to-temp-fsync-rename pattern:
-  1. Write to a temporary file in the SAME directory (same filesystem ⇒ atomic rename).
-  2. ``fsync()`` the temporary file's file descriptor.
-  3. ``os.replace()`` / ``Path.replace()`` the temp file onto the target path.
-  4. ``fsync()`` the parent directory to make the rename durable.
-
-On Windows, Step 4 fails silently (directory fsync is not supported) but the
-rename is still the best available atomic write on NTFS/ReFS.
 """
 
 import os
@@ -110,8 +95,16 @@ def atomic_write(path: Path, data: bytes) -> None:
             # Not supported on Windows — acceptable
             pass
 
+    except (PermissionError, OSError):
+        # Re-raise OS errors directly so callers catching PermissionError / OSError
+        # still see the original type. Clean up the temp file first.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     except Exception as exc:
-        # Clean up the temp file if anything went wrong
+        # Unexpected non-OS error (e.g. codec failure) -- wrap as FsyncError
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:

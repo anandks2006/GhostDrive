@@ -1,53 +1,5 @@
 """
 telegram_backend.py -- GhostDrive Telegram Backend Plugin.
-
-Spec §6.2 -- Telegram
-=====================
-Tier:              CRITICAL
-Free tier:         Unlimited
-Logical chunk:     1.5 GB
-Sub-block:         50 MB
-Session storage:   OS keyring (DPAPI/libsecret/Keychain) via keyring library
-                   NOT stored in ghostdrive.db or any plaintext file (Spec §4.5)
-Flood wait:        Automatic handler with exponential backoff
-Session expiry:    Detected as DISTINCT error from generic auth failure.
-                   Triggers manual reauth alert (not a generic auth error dialog).
-Dedicated account: Spec requires a dedicated Telegram account, NOT the user's
-                   personal account, to avoid accidental deletion of chunks.
-
-Upload flow (per sub-block)
----------------------------
-  1. caller: quota_reserved decremented atomically (backends table)
-  2. caller: pending intent written to chunk_locations + fsynced
-  3. THIS MODULE: stream -> send_file("me", ..., force_document=True)
-  4. caller: on success -> status=confirmed, quota_used incremented
-  5. caller: on failure -> status=failed, quota_reserved restored
-
-Download flow
--------------
-  1. get_messages("me", ids=message_id) -> fetch message by stored message_id
-  2. download_media(msg, file=bytes) -> returns encrypted bytes
-  3. caller verifies Poly1305 tag BEFORE passing bytes to decryptor
-
-Session management
-------------------
-  The Telethon session string is stored in OS keyring, NOT in a .session file.
-  On first run: authenticate via phone OTP, extract session string, store in keyring.
-  On subsequent runs: load session string from keyring, skip OTP.
-  Key: service="ghostdrive", username="telegram_session"
-
-Flood wait handling (Spec §6.2)
---------------------------------
-  FloodWaitError: wait exactly flood_wait.seconds + 5 s jitter, then retry.
-  Max retries: 5 per sub-block before escalating to BackendRateLimitError.
-  The retry counter is per-operation, not per-session.
-
-Session expiry detection
-------------------------
-  SessionExpiredError, AuthKeyError, AuthKeyDuplicatedError from Telethon
-  -> TelegramSessionExpiredError (distinct from generic BackendAuthError)
-  -> GUI shows "Telegram session expired -- please re-authenticate" alert
-  -> NOT the generic "authentication failed" dialog
 """
 
 from __future__ import annotations
@@ -56,22 +8,7 @@ import asyncio
 import io
 import logging
 import time
-from typing import AsyncGenerator, Optional
-
-logger = logging.getLogger(__name__)
-
-try:
-    from telethon import TelegramClient, errors as tl_errors
-    from telethon.tl.types import DocumentAttributeFilename
-    _TELETHON_AVAILABLE = True
-except ImportError:
-    _TELETHON_AVAILABLE = False
-
-try:
-    import keyring as _keyring
-    _KEYRING_AVAILABLE = True
-except ImportError:
-    _KEYRING_AVAILABLE = False
+from typing import Any, AsyncGenerator, Optional
 
 from ghostdrive.backends.base import BackendBase, HealthResult
 from ghostdrive.exceptions import (
@@ -79,55 +16,43 @@ from ghostdrive.exceptions import (
     BackendConnectionError,
     BackendNotFoundError,
     BackendRateLimitError,
-    BackendQuotaError,
     TelegramSessionExpiredError,
 )
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
-# Spec §5.4 -- Telegram chunk/sub-block sizes
-LOGICAL_CHUNK_BYTES = 1_500 * 1024 * 1024   # 1.5 GB
-SUB_BLOCK_BYTES     =    50 * 1024 * 1024   # 50 MB
+try:
+    from telethon import TelegramClient, errors as tl_errors  # type: ignore
+    from telethon.tl.types import DocumentAttributeFilename  # type: ignore
+    _TELETHON_AVAILABLE = True
+except ImportError:
+    _TELETHON_AVAILABLE = False
 
-# Flood wait
+try:
+    import keyring as _keyring  # type: ignore
+    _KEYRING_AVAILABLE = True
+except ImportError:
+    _KEYRING_AVAILABLE = False
+
+
+LOGICAL_CHUNK_BYTES = 1_500 * 1024 * 1024
+SUB_BLOCK_BYTES     =    50 * 1024 * 1024
+
 _FLOOD_WAIT_MAX_RETRIES = 5
 _FLOOD_WAIT_JITTER_S    = 5
 
-# OS keyring keys for session storage (Spec §4.5)
 _KEYRING_SERVICE  = "ghostdrive"
 _KEYRING_ACCOUNT  = "telegram_session"
-
-# Telegram Saved Messages target (upload to own account)
 _SAVED_MESSAGES = "me"
-
-# Caption prefix for all uploaded sub-blocks (for identification / cleanup)
 _CAPTION_PREFIX = "GhostDrive"
 
 
 class TelegramBackend(BackendBase):
     """
     GhostDrive Telegram backend plugin.
-
     Implements the BackendBase interface for Telegram using Telethon (MTProto).
-
-    Usage
-    -----
-        backend = TelegramBackend(api_id=..., api_hash=...)
-        await backend.connect()
-        ref_id = await backend.upload(stream, chunk_id="uuid", sub_block_index=0)
-        async for block in backend.download(ref_id):
-            ...
-        await backend.disconnect()
-
-    Session lifecycle
-    -----------------
-    Session string is stored in and loaded from OS keyring.
-    Use ``first_run_authenticate()`` to perform the initial OTP authentication
-    and persist the session to keyring. Subsequent ``connect()`` calls load
-    from keyring automatically.
     """
 
-    # ── Capability flags (Spec §6.1) ─────────────────────────────────────────
     supports_range_requests: bool = False
     supports_streaming:      bool = True
     supports_deletion:       bool = True
@@ -145,16 +70,14 @@ class TelegramBackend(BackendBase):
         api_id: Optional[int] = None,
         api_hash: Optional[str] = None,
         phone: Optional[str] = None,
+        _skip_keyring: bool = False,
     ) -> None:
         """
         Args:
-            api_id:   Telegram API ID (from https://my.telegram.org).
-                      Loaded from OS keyring via credentials_ref -- NOT
-                      stored in ghostdrive.db or passed in plaintext at
-                      runtime. Passed here for the initial first_run only.
-            api_hash: Telegram API hash.
-            phone:    Phone number for OTP (first_run_authenticate() only).
-                      NOT stored after session creation.
+            api_id:        Telegram API ID. Loaded from credential_store if not provided.
+            api_hash:      Telegram API hash. Loaded from credential_store if not provided.
+            phone:         Phone number for OTP. NOT stored after session creation.
+            _skip_keyring: If True, skip keyring lookup (credentials already resolved by caller).
         """
         if not _TELETHON_AVAILABLE:
             raise ImportError(
@@ -166,15 +89,22 @@ class TelegramBackend(BackendBase):
         self._api_hash = api_hash
         self._phone    = phone
 
-        if self._api_id is None and _KEYRING_AVAILABLE:
-            val = _keyring.get_password("ghostdrive", "telegram_api_id")
-            self._api_id = int(val) if val and val.isdigit() else None
-        if self._api_hash is None and _KEYRING_AVAILABLE:
-            self._api_hash = _keyring.get_password("ghostdrive", "telegram_api_hash")
-        if self._phone is None and _KEYRING_AVAILABLE:
-            self._phone = _keyring.get_password("ghostdrive", "telegram_phone")
+        if not _skip_keyring:
+            # Load from the process-global credential_store (decrypts from OS Keyring)
+            try:
+                from ghostdrive.crypto.credential_store import credential_store
+                if self._api_id is None:
+                    val = credential_store.load("telegram_api_id")
+                    self._api_id = int(val) if val and val.isdigit() else None
+                if self._api_hash is None:
+                    self._api_hash = credential_store.load("telegram_api_hash")
+                if self._phone is None:
+                    self._phone = credential_store.load("telegram_phone")
+            except Exception as exc:
+                logger.warning("TelegramBackend: credential_store lookup failed: %s", exc)
 
         self._client: Optional[TelegramClient] = None
+        self._session_str: Optional[str] = None
 
     # ── Connection lifecycle ──────────────────────────────────────────────────
 
@@ -226,7 +156,12 @@ class TelegramBackend(BackendBase):
                 f"Telegram connection failed: {exc}"
             ) from exc
 
-    async def first_run_authenticate(self, phone: Optional[str] = None) -> None:
+    async def first_run_authenticate(
+        self,
+        phone: Optional[str] = None,
+        code_callback: Optional[Any] = None,
+        password_callback: Optional[Any] = None,
+    ) -> None:
         """
         Perform the initial phone OTP authentication and persist session to keyring.
 
@@ -234,7 +169,9 @@ class TelegramBackend(BackendBase):
         ``connect()`` loads the session from keyring automatically.
 
         Args:
-            phone: Phone number (uses self._phone if not provided).
+            phone:             Phone number (uses self._phone if not provided).
+            code_callback:     Optional callback/coroutine to fetch the OTP code.
+            password_callback: Optional callback/coroutine to fetch the 2FA password.
 
         Raises:
             BackendAuthError:      Authentication failed.
@@ -253,8 +190,13 @@ class TelegramBackend(BackendBase):
         )
 
         try:
-            await self._client.start(phone=phone)
+            await self._client.start(  # type: ignore
+                phone=phone,
+                code_callback=code_callback,
+                password=password_callback,
+            )
             session_string = self._client.session.save()
+            self._session_str = session_string
             self._save_session_to_keyring(session_string)
 
             me = await self._client.get_me()
@@ -274,7 +216,7 @@ class TelegramBackend(BackendBase):
     async def disconnect(self) -> None:
         """Cleanly disconnect from Telegram."""
         if self._client and self._client.is_connected():
-            await self._client.disconnect()
+            await self._client.disconnect()  # type: ignore
             self._client = None
             logger.debug("Telegram backend disconnected.")
 
@@ -310,6 +252,7 @@ class TelegramBackend(BackendBase):
         buf = io.BytesIO()
         async for block in stream:
             buf.write(block)
+        size = buf.tell()
         buf.seek(0)
 
         # Filename encodes identity for retrieval and debugging
@@ -320,7 +263,7 @@ class TelegramBackend(BackendBase):
 
         logger.info(
             "Telegram upload OK: chunk=%s sub_block=%d message_id=%d size=%d",
-            chunk_id[:8], sub_block_index, message.id, buf.tell(),
+            chunk_id[:8], sub_block_index, message.id, size,
         )
         return str(message.id)
 
@@ -489,37 +432,39 @@ class TelegramBackend(BackendBase):
 
     def _save_session_to_keyring(self, session_string: str) -> None:
         """
-        Store the Telethon session string in OS keyring.
+        Encrypt and store the Telethon session string via the process-global
+        credential_store (AES-256-GCM + OS Keyring).
 
-        Platform:  Windows -> DPAPI, Linux -> libsecret, macOS -> Keychain.
-        Falls back to a warning if keyring is unavailable (no plaintext fallback
-        for session -- user must re-authenticate on next run in that case).
+        Falls back to a warning if the store is locked — no plaintext fallback.
         """
-        if not _KEYRING_AVAILABLE:
+        try:
+            from ghostdrive.crypto.credential_store import credential_store
+            credential_store.store(_KEYRING_ACCOUNT, session_string)
+            logger.info("Telegram session encrypted and saved to OS keyring (%s / %s)",
+                        _KEYRING_SERVICE, _KEYRING_ACCOUNT)
+        except Exception as exc:
             logger.error(
-                "keyring library not available. Telegram session NOT persisted. "
-                "Install it: pip install keyring"
+                "Failed to save Telegram session to credential_store: %s. "
+                "Session will NOT be persisted.", exc
             )
-            return
-
-        _keyring.set_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT, session_string)
-        logger.info("Telegram session saved to OS keyring (%s / %s)", _KEYRING_SERVICE, _KEYRING_ACCOUNT)
 
     def _load_session_from_keyring(self) -> Optional[str]:
         """
-        Load the Telethon session string from OS keyring.
+        Decrypt and load the Telethon session string from the OS Keyring
+        via the process-global credential_store.
 
         Returns:
-            Session string, or None if not found.
+            Plaintext session string, or None if not found or store locked.
         """
-        if not _KEYRING_AVAILABLE:
-            logger.error("keyring library not available. Cannot load Telegram session.")
+        try:
+            from ghostdrive.crypto.credential_store import credential_store
+            session = credential_store.load(_KEYRING_ACCOUNT)
+            if session:
+                logger.debug("Telegram session loaded from credential_store.")
+            return session
+        except Exception as exc:
+            logger.error("Failed to load Telegram session from credential_store: %s", exc)
             return None
-
-        session = _keyring.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
-        if session:
-            logger.debug("Telegram session loaded from OS keyring.")
-        return session
 
     def _delete_session_from_keyring(self) -> None:
         """Remove the session from keyring (e.g. after session expiry)."""

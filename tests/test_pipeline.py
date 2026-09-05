@@ -50,6 +50,7 @@ def _make_db(tmp_path: Path) -> GhostDriveDB:
         path=tmp_path / "test.db",
         ledger_key=bytes(range(32)),
         genesis_seed=bytes(range(32, 64)),
+        master_key=bytes(range(32)),
     )
     db.open()
     return db
@@ -408,7 +409,8 @@ class TestChunker:
         link = tmp_path / "link.txt"
         link.symlink_to(target)
         resolved = resolve_path(link)
-        assert resolved == target.resolve()  # Use .resolve() to handle Windows //?/ prefix
+        # Use os.path.samefile to compare regardless of //?/ UNC prefix differences on Windows
+        assert os.path.samefile(str(resolved), str(target))
 
     def test_resolve_path_missing_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
@@ -490,7 +492,7 @@ class TestChunkUploader:
         with db.transaction():
             db.insert_file({
                 "id": file_id, "name": "source.txt", "path": "/source.txt",
-                "size": 1024, "mime_type": "text/plain", "tier": "IMPORTANT",
+                "size": 1024, "mime_type": "text/plain", "tier": "DISPOSABLE",
                 "created_at": now, "modified_at": now,
                 "version": 1, "version_of": None,
                 "tombstone": 0, "tombstone_at": None,
@@ -570,7 +572,7 @@ class TestChunkUploader:
         with db.transaction():
             db.insert_file({
                 "id": file_id, "name": "source.txt", "path": "/source.txt",
-                "size": 1024, "mime_type": "text/plain", "tier": "IMPORTANT",
+                "size": 1024, "mime_type": "text/plain", "tier": "DISPOSABLE",
                 "created_at": now, "modified_at": now,
                 "version": 1, "version_of": None,
                 "tombstone": 0, "tombstone_at": None,
@@ -638,7 +640,7 @@ class TestChunkUploader:
         with db.transaction():
             db.insert_file({
                 "id": file_id, "name": "source.txt", "path": "/source.txt",
-                "size": 1024, "mime_type": "text/plain", "tier": "IMPORTANT",
+                "size": 1024, "mime_type": "text/plain", "tier": "DISPOSABLE",
                 "created_at": now, "modified_at": now,
                 "version": 1, "version_of": None,
                 "tombstone": 0, "tombstone_at": None,
@@ -700,7 +702,7 @@ class TestChunkUploader:
         with db.transaction():
             db.insert_file({
                 "id": file_id, "name": "source.txt", "path": "/source.txt",
-                "size": 1024, "mime_type": "text/plain", "tier": "IMPORTANT",
+                "size": 1024, "mime_type": "text/plain", "tier": "DISPOSABLE",
                 "created_at": now, "modified_at": now,
                 "version": 1, "version_of": None,
                 "tombstone": 0, "tombstone_at": None,
@@ -769,7 +771,7 @@ class TestChunkUploader:
         with db.transaction():
             db.insert_file({
                 "id": file_id, "name": "source.txt", "path": "/source.txt",
-                "size": 1024, "mime_type": "text/plain", "tier": "IMPORTANT",
+                "size": 1024, "mime_type": "text/plain", "tier": "DISPOSABLE",
                 "created_at": now, "modified_at": now,
                 "version": 1, "version_of": None,
                 "tombstone": 0, "tombstone_at": None,
@@ -862,7 +864,7 @@ class TestChunkUploader:
         with db.transaction():
             db.insert_file({
                 "id": file_id, "name": "source.txt", "path": "/source.txt",
-                "size": 1024, "mime_type": "text/plain", "tier": "IMPORTANT",
+                "size": 1024, "mime_type": "text/plain", "tier": "DISPOSABLE",
                 "created_at": now, "modified_at": now,
                 "version": 1, "version_of": None,
                 "tombstone": 0, "tombstone_at": None,
@@ -915,4 +917,250 @@ class TestChunkUploader:
         assert loc_map[backend_id2]["reference_id"] == "ref-backend2"
 
         db.close()
+
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_blake3_hash_stored(self, tmp_path):
+        from ghostdrive.pipeline.upload import ChunkUploader
+        from ghostdrive.crypto.nonce import NonceManager
+        
+        db = _make_db(tmp_path)
+        backend_id = _make_backend_row(db)
+        
+        mock_backend = MagicMock()
+        mock_backend.id = backend_id
+        mock_backend.upload = AsyncMock(return_value="ref-abc")
+        
+        nm = NonceManager(data_dir=tmp_path)
+        file_path = tmp_path / "source.txt"
+        file_path.write_bytes(b"hello world")
+        
+        descriptor = ChunkDescriptor(
+            chunk_index=0,
+            offset=0,
+            size=11,
+            total_chunks=1,
+            is_manifest=False,
+        )
+        
+        file_id = str(uuid.uuid4())
+        now = "2024-01-01T00:00:00+00:00"
+        with db.transaction():
+            db.insert_file({
+                "id": file_id, "name": "source.txt", "path": "/source.txt",
+                "size": 11, "mime_type": "text/plain", "tier": "DISPOSABLE",
+                "created_at": now, "modified_at": now,
+                "version": 1, "version_of": None,
+                "tombstone": 0, "tombstone_at": None,
+            })
+            
+        uploader = ChunkUploader(
+            db=db,
+            backend=mock_backend,
+            master_key=bytes(range(32)),
+            hkdf_salt=bytes(range(32, 64)),
+            nonce_manager=nm,
+        )
+        
+        chunk_id = await uploader.upload_chunk(
+            path=file_path,
+            descriptor=descriptor,
+            file_id=file_id,
+            mime_type="text/plain",
+        )
+        
+        assert chunk_id is not None
+        chunk_row = db._conn.execute("SELECT blake3_hash FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+        assert chunk_row is not None
+        # BLAKE3 hash of b"hello world" is d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24
+        assert chunk_row["blake3_hash"] == "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_retry_exponential_backoff(self, tmp_path):
+        from ghostdrive.pipeline.upload import ChunkUploader
+        from ghostdrive.crypto.nonce import NonceManager
+        from ghostdrive.exceptions import BackendConnectionError
+        
+        db = _make_db(tmp_path)
+        backend_id = _make_backend_row(db)
+        
+        # Mock backend that fails once with BackendConnectionError and then succeeds
+        mock_backend = MagicMock()
+        mock_backend.id = backend_id
+        
+        fail_count = [0]
+        async def mock_upload(stream, chunk_id, sub_block_index):
+            if fail_count[0] < 1:
+                fail_count[0] += 1
+                raise BackendConnectionError("Transient connection drop")
+            return "ref-retried"
+            
+        mock_backend.upload = MagicMock(side_effect=mock_upload)
+        
+        nm = NonceManager(data_dir=tmp_path)
+        file_path = tmp_path / "source.txt"
+        file_path.write_bytes(b"data")
+        
+        descriptor = ChunkDescriptor(
+            chunk_index=0,
+            offset=0,
+            size=4,
+            total_chunks=1,
+            is_manifest=False,
+        )
+        
+        file_id = str(uuid.uuid4())
+        now = "2024-01-01T00:00:00+00:00"
+        with db.transaction():
+            db.insert_file({
+                "id": file_id, "name": "source.txt", "path": "/source.txt",
+                "size": 4, "mime_type": "text/plain", "tier": "DISPOSABLE",
+                "created_at": now, "modified_at": now,
+                "version": 1, "version_of": None,
+                "tombstone": 0, "tombstone_at": None,
+            })
+            
+        uploader = ChunkUploader(
+            db=db,
+            backend=mock_backend,
+            master_key=bytes(range(32)),
+            hkdf_salt=bytes(range(32, 64)),
+            nonce_manager=nm,
+        )
+        
+        # Patch asyncio.sleep to keep the test fast
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            chunk_id = await uploader.upload_chunk(
+                path=file_path,
+                descriptor=descriptor,
+                file_id=file_id,
+                mime_type="text/plain",
+            )
+            
+            assert chunk_id is not None
+            mock_sleep.assert_called_once()  # Sleep should be called exactly once for retry
+            
+        loc_row = db._conn.execute("SELECT status, reference_id FROM chunk_locations WHERE chunk_id = ?", (chunk_id,)).fetchone()
+        assert loc_row is not None
+        assert loc_row["status"] == "confirmed"
+        assert loc_row["reference_id"] == "ref-retried"
+        db.close()
+
+
+class TestErasureCoding:
+    @pytest.mark.asyncio
+    async def test_erasure_coding_upload_download(self, tmp_path):
+        from ghostdrive.pipeline.upload import ChunkUploader
+        from ghostdrive.crypto.nonce import NonceManager
+        from ghostdrive.pipeline.healing import verify_chunk_location
+        from unittest.mock import patch
+        
+        db = _make_db(tmp_path)
+        backend_id = _make_backend_row(db)
+        
+        # Configure active backends dictionary with a mock backend
+        mock_backend = MagicMock()
+        mock_backend.id = backend_id
+        mock_backend.type = "discord"
+        mock_backend._connected = True
+        
+        # Simulating upload of shards
+        uploaded_shards = {}
+        async def mock_upload(stream, chunk_id, sub_block_index):
+            data = bytearray()
+            async for chunk in stream:
+                data.extend(chunk)
+            uploaded_shards[sub_block_index] = bytes(data)
+            return f"ref-{sub_block_index}"
+            
+        mock_backend.upload = MagicMock(side_effect=mock_upload)
+        
+        # Simulating download of shards
+        async def mock_download(reference_id):
+            sub_idx = int(reference_id.split("-")[1])
+            if sub_idx in uploaded_shards:
+                yield uploaded_shards[sub_idx]
+            else:
+                raise Exception("Shard not found")
+                
+        mock_backend.download = MagicMock(side_effect=mock_download)
+        
+        nm = NonceManager(data_dir=tmp_path)
+        file_path = tmp_path / "source.txt"
+        file_path.write_bytes(b"A" * 1024)
+        
+        descriptor = ChunkDescriptor(
+            chunk_index=0,
+            offset=0,
+            size=1024,
+            total_chunks=1,
+            is_manifest=False,
+        )
+        
+        file_id = str(uuid.uuid4())
+        now = "2024-01-01T00:00:00+00:00"
+        with db.transaction():
+            db.insert_file({
+                "id": file_id, "name": "source.txt", "path": "/source.txt",
+                "size": 1024, "mime_type": "text/plain", "tier": "CRITICAL",
+                "created_at": now, "modified_at": now,
+                "version": 1, "version_of": None,
+                "tombstone": 0, "tombstone_at": None,
+            })
+            
+        active_backends = {backend_id: mock_backend, "discord": mock_backend}
+        
+        uploader = ChunkUploader(
+            db=db,
+            backend=mock_backend,
+            master_key=bytes(range(32)),
+            hkdf_salt=bytes(range(32, 64)),
+            nonce_manager=nm,
+            active_backends=active_backends,
+        )
+        
+        chunk_id = await uploader.upload_chunk(
+            path=file_path,
+            descriptor=descriptor,
+            file_id=file_id,
+            mime_type="text/plain",
+        )
+        
+        assert chunk_id is not None
+        
+        # Check sub_block_count >= 6 (erasure coded)
+        chunk_row = db._conn.execute("SELECT sub_block_count FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+        assert chunk_row is not None
+        assert chunk_row["sub_block_count"] >= 6
+        
+        # Check 6 confirmed locations
+        locs_count = db._conn.execute("SELECT COUNT(*) FROM chunk_locations WHERE chunk_id = ?", (chunk_id,)).fetchone()[0]
+        assert locs_count == 6
+        
+        # Try download/verify
+        km = MagicMock()
+        km.master_key = bytes(range(32))
+        km.hkdf_salt = bytes(range(32, 64))
+        
+        loc_row = db._conn.execute("SELECT * FROM chunk_locations WHERE chunk_id = ? LIMIT 1", (chunk_id,)).fetchone()
+        
+        # 1. Verification with all shards present should succeed
+        res = await verify_chunk_location(db, loc_row, km, active_backends)
+        assert res == "ok"
+        
+        # 2. Delete 2 shards from uploaded_shards to simulate backend storage failure.
+        # zfec 4+2 shards requires at least 4 shards, so losing 2 shards should still succeed!
+        del uploaded_shards[1]
+        del uploaded_shards[3]
+        res_with_2_lost = await verify_chunk_location(db, loc_row, km, active_backends)
+        assert res_with_2_lost == "ok"
+        
+        # 3. Delete a 3rd shard (leaving only 3 shards). Reassembling should fail!
+        del uploaded_shards[4]
+        res_with_3_lost = await verify_chunk_location(db, loc_row, km, active_backends)
+        assert res_with_3_lost in ("not_found", "auth_failed")
+        
+        db.close()
+
 

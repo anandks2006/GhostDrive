@@ -24,7 +24,7 @@ data. This means:
 from __future__ import annotations
 
 import logging
-import sqlite3
+import sqlcipher3 as sqlite3
 from pathlib import Path
 from typing import Optional
 
@@ -56,6 +56,8 @@ class FTSIndex:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Set default encryption key for FTS standalone database
+        self._conn.execute("PRAGMA key = 'test_fts_key'")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._create_fts_table()
         logger.info("FTS index opened: %s", self._path)

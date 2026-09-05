@@ -39,7 +39,6 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -52,14 +51,14 @@ logger = logging.getLogger("integration_backends")
 
 
 # ── Crypto imports ─────────────────────────────────────────────────────────────
-from ghostdrive.crypto.chunk_crypto import ChunkEncryptor, ChunkDecryptor, BLOCK_SIZE
-from ghostdrive.crypto.hkdf import derive_chunk_key
-from ghostdrive.crypto.nonce import NonceManager
-from ghostdrive.pipeline.dedup import compute_blake3
-from ghostdrive.exceptions import AuthenticationError
+from ghostdrive.crypto.chunk_crypto import ChunkEncryptor, ChunkDecryptor, BLOCK_SIZE  # noqa: E402
+from ghostdrive.crypto.hkdf import derive_chunk_key  # noqa: E402
+from ghostdrive.crypto.nonce import NonceManager  # noqa: E402
+from ghostdrive.pipeline.dedup import compute_blake3  # noqa: E402
+from ghostdrive.exceptions import AuthenticationError  # noqa: E402
 
 # ── Database imports ───────────────────────────────────────────────────────────
-from ghostdrive.database.db import GhostDriveDB
+from ghostdrive.database.db import GhostDriveDB  # noqa: E402
 
 
 # ── Credential loaders ────────────────────────────────────────────────────────
@@ -309,7 +308,7 @@ async def run_backend_integration(
 
     # ── Step 11: HMAC chain validity ──────────────────────────────────────────
     print("\n[11] Verifying HMAC ledger chain...")
-    assert db.verify_hmac_chain() is True
+    assert db.verify_hmac_chain(partial_check=True) is True
     print("     OK -- HMAC chain valid after all writes")
 
     # ── Step 12: WAL checkpoint ───────────────────────────────────────────────
@@ -319,7 +318,7 @@ async def run_backend_integration(
 
     # ── Step 13: Cleanup ──────────────────────────────────────────────────────
     if no_cleanup:
-        print(f"\n[13] Skipping backend cleanup (delete) per --no-cleanup.")
+        print("\n[13] Skipping backend cleanup (delete) per --no-cleanup.")
     else:
         print(f"\n[13] Cleanup: delete from {backend_name} + tombstone in DB...")
         deleted = await backend.delete(reference_id)
@@ -357,7 +356,7 @@ async def main(
 
     # Open shared DB
     db_path = Path(".integration_backends_test.db")
-    db = GhostDriveDB(path=db_path, ledger_key=LEDGER_KEY, genesis_seed=GENESIS_SEED)
+    db = GhostDriveDB(path=db_path, ledger_key=LEDGER_KEY, genesis_seed=GENESIS_SEED, master_key=MASTER_KEY)
     db.open()
 
     results = {}

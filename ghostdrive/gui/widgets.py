@@ -2,10 +2,10 @@
 widgets.py -- Reusable custom styled widgets for GhostDrive PyQt6 GUI.
 """
 
-import os
+import logging
 from pathlib import Path
 from typing import Optional
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QRunnable, QObject, QThreadPool
 from PyQt6.QtGui import QPixmap, QIcon, QAction
 from PyQt6.QtWidgets import (
     QWidget,
@@ -14,7 +14,11 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QLabel,
     QVBoxLayout,
+    QComboBox,
+    QListView,
 )
+
+logger = logging.getLogger(__name__)
 
 # Pillow & PyMuPDF (fitz) imports
 try:
@@ -41,10 +45,13 @@ class StyledButton(QPushButton):
         super().__init__(text, parent)
         if primary:
             self.setObjectName("PrimaryButton")
+            self.setProperty("theme", "primary")
         elif danger:
             self.setObjectName("DangerButton")
+            self.setProperty("theme", "danger")
         elif secondary:
             self.setObjectName("SecondaryButton")
+            self.setProperty("theme", "secondary")
 
 
 class StyledLineEdit(QLineEdit):
@@ -91,17 +98,33 @@ class PasswordLineEdit(QLineEdit):
             self.toggle_action.setIcon(self._get_icon(True))
 
 
+class StyledComboBox(QComboBox):
+    """Custom styled QComboBox that uses a QListView view to ensure reliable stylesheet application on all platforms."""
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        view = QListView(self)
+        self.setView(view)
+
+    def wheelEvent(self, event) -> None:
+        # Ignore mouse wheel events on the combobox itself to prevent accidental changes when scrolling the container page
+        event.ignore()
+
+
 # ─── Lazy Thumbnail Loader Thread ───────────
 
-class ThumbnailLoaderWorker(QThread):
-    """Background worker thread to generate and load image/PDF thumbnails to keep GUI fluid."""
+class ThumbnailWorkerSignals(QObject):
+    """Signals for the background thumbnail runnable."""
     thumbnail_loaded = pyqtSignal(str, QPixmap)
 
+
+class ThumbnailLoaderRunnable(QRunnable):
+    """Background worker runnable to generate and load image/PDF thumbnails to keep GUI fluid using QThreadPool."""
     def __init__(self, file_path: str, max_size: QSize, file_id: Optional[str] = None) -> None:
         super().__init__()
         self._file_path = file_path
         self._max_size = max_size
         self._file_id = file_id
+        self.signals = ThumbnailWorkerSignals()
 
     def run(self) -> None:
         local_path = Path(self._file_path)
@@ -142,10 +165,10 @@ class ThumbnailLoaderWorker(QThread):
                 
         except Exception as exc:
             # Silent fallback on generation issues, default to standard icon
-            print(f"[Thumbnail Error] Failed to generate for {local_path.name}: {exc}")
+            logger.warning("Thumbnail generation failed for %s: %s", local_path.name, exc)
 
         if pixmap and not pixmap.isNull():
-            self.thumbnail_loaded.emit(self._file_path, pixmap)
+            self.signals.thumbnail_loaded.emit(self._file_path, pixmap)
 
 
 class ThumbnailWidget(QWidget):
@@ -216,9 +239,9 @@ class ThumbnailWidget(QWidget):
             if not desktop_path.exists() or not desktop_path.is_file():
                 return  # Cannot generate if local file doesn't exist
 
-        self._worker = ThumbnailLoaderWorker(self._file_path, self._max_size, self._file_id)
-        self._worker.thumbnail_loaded.connect(self._on_thumbnail_loaded)
-        self._worker.start()
+        self._worker = ThumbnailLoaderRunnable(self._file_path, self._max_size, self._file_id)
+        self._worker.signals.thumbnail_loaded.connect(self._on_thumbnail_loaded)
+        QThreadPool.globalInstance().start(self._worker)
 
     def _on_thumbnail_loaded(self, path_str: str, pixmap: QPixmap) -> None:
         self._full_pixmap = pixmap
@@ -238,10 +261,7 @@ class ThumbnailWidget(QWidget):
             blob_bytes = bytes(buffer.data())
             self.on_thumbnail_generated(blob_bytes)
 
-        # Prevent memory leak
         if self._worker:
-            self._worker.quit()
-            self._worker.wait()
             self._worker = None
 
     def resize_thumbnail(self, new_size: int) -> None:

@@ -49,6 +49,7 @@ import time
 from pathlib import Path
 
 # ── Make sure the package root is on the path ─────────────────────────────────
+from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -62,15 +63,15 @@ except ImportError as exc:
     sys.exit(1)
 
 # ── GhostDrive Phase 1 crypto ─────────────────────────────────────────────────
-from ghostdrive.crypto.chunk_crypto import (
+from ghostdrive.crypto.chunk_crypto import (  # noqa: E402
     BLOCK_SIZE,
     TAG_SIZE,
     ChunkDecryptor,
     ChunkEncryptor,
 )
-from ghostdrive.crypto.hkdf import derive_chunk_key
-from ghostdrive.crypto.nonce import NonceManager
-from ghostdrive.exceptions import AuthenticationError
+from ghostdrive.crypto.hkdf import derive_chunk_key  # noqa: E402
+from ghostdrive.crypto.nonce import NonceManager  # noqa: E402
+from ghostdrive.exceptions import AuthenticationError  # noqa: E402
 
 # ── Load credentials from the local (gitignored) file ─────────────────────────
 try:
@@ -375,7 +376,7 @@ async def main():
 
     file_tag = f"test{int(time.time()) % 100000:05d}"
     print(f"[*] Connecting to Telegram (session: {SESSION_NAME})...")
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    client: Any = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
     message_ids: list[int] = []
     index_path = ROOT / f"integration_index_{file_tag}.json"

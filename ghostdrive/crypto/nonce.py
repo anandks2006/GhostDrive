@@ -1,31 +1,10 @@
 """
 nonce.py — Nonce management for ChaCha20-Poly1305 chunk encryption.
-
-Spec §4.4 — Critical Cryptographic Rules (Nonce Counter)
-=========================================================
-  "Nonce counter: incremented BEFORE the chunk upload begins, not after it
-   confirms. A wasted nonce from a failed upload is acceptable. A reused
-   nonce from crash-before-increment is catastrophic under ChaCha20-Poly1305."
-
-  "Nonce counter increment and the operation it timestamps must be in the same
-   SQLite transaction — atomic with the write they protect."
-
-Month 1 Implementation Notes
------------------------------
-In Month 1 (before the SQLite database layer arrives in Month 2), nonces are
-persisted to a JSON file using ``atomic_write()`` + fsync. This ensures the
-counter survives crashes.
-
-In Month 2, ``NonceManager`` will be replaced by a database-backed
-implementation where the nonce counter increment is inside the same SQLite
-transaction as the chunk's ``pending`` intent record. The interface is
-intentionally identical so all call sites need no changes.
 """
 
 import json
-import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from ghostdrive.exceptions import CryptoError, NonceExhaustedError
 from ghostdrive.utils.fsync import atomic_write
@@ -56,15 +35,17 @@ class NonceManager:
     In Month 2 the database transaction provides the serialisation guarantee.
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, db: Optional[Any] = None) -> None:
         """
         Args:
             data_dir: Directory where ``nonce_counter.json`` is stored.
                       This should be the GhostDrive app-data directory.
+            db: Optional GhostDriveDB instance for database-backed nonces.
         """
         self._data_dir = Path(data_dir)
         self._counter_path = self._data_dir / _COUNTER_FILENAME
         self._counter: Optional[int] = None  # Loaded lazily on first use
+        self._db = db
 
     # ─── Public interface ──────────────────────────────────────────────────────
 
@@ -91,6 +72,25 @@ class NonceManager:
                                   in practice; here for correctness).
             FsyncError: If the counter cannot be persisted to disk.
         """
+        if self._db is not None:
+            # Must be atomic: another concurrent caller must not read the same counter.
+            # We acquire self._db._lock. Since this is always called from within an active
+            # transaction in upload.py, the statements are executed within the parent transaction.
+            with self._db._lock:
+                self._db._conn.execute(
+                    "UPDATE hmac_ledger SET nonce_counter = nonce_counter + 1 WHERE id = 1"
+                )
+                row = self._db._conn.execute(
+                    "SELECT nonce_counter FROM hmac_ledger WHERE id = 1"
+                ).fetchone()
+                new_counter = row["nonce_counter"]
+                if new_counter > MAX_NONCE_COUNTER:
+                    raise NonceExhaustedError(
+                        "Nonce counter overflow — 2^96 nonces exhausted. "
+                        "This is effectively impossible in practice."
+                    )
+            return self._counter_to_bytes(new_counter)
+
         if self._counter is None:
             self._counter = self._load_counter()
 
@@ -116,6 +116,10 @@ class NonceManager:
         Return the current counter value without incrementing.
         Loads from disk on first call.
         """
+        if self._db is not None:
+            row = self._db._conn.execute("SELECT nonce_counter FROM hmac_ledger WHERE id = 1").fetchone()
+            return row["nonce_counter"] if row else 0
+
         if self._counter is None:
             self._counter = self._load_counter()
         return self._counter

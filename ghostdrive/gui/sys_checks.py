@@ -2,7 +2,6 @@
 sys_checks.py -- Pre-flight environment check (Windows Long Paths and Linux inotify limits).
 """
 
-import sys
 import os
 import platform
 from typing import Dict, Tuple

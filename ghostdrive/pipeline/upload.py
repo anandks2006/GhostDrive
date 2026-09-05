@@ -51,24 +51,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import random
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-from ghostdrive.crypto.chunk_crypto import ChunkEncryptor, BLOCK_SIZE
 from ghostdrive.crypto.hkdf import derive_chunk_key
 from ghostdrive.database.db import GhostDriveDB
 from ghostdrive.exceptions import (
     BackendConnectionError,
     BackendRateLimitError,
-    CancellationError,
     ChunkError,
-    QuotaReservationError,
 )
-from ghostdrive.pipeline.chunker import ChunkDescriptor, read_chunk_async
-from ghostdrive.pipeline.compressor import compress_stream, should_skip_compression
-from ghostdrive.pipeline.dedup import DedupChecker, compute_blake3_file_async
+from ghostdrive.pipeline.chunker import ChunkDescriptor
 from ghostdrive.pipeline.quota import QuotaManager
 
 logger = logging.getLogger(__name__)
@@ -78,6 +75,22 @@ _SUB_BLOCK_BYTES = 50 * 1024 * 1024   # 50 MB -- spec §5.4
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _compute_blake3_chunk(path: Path, offset: int, size: int, block_size: int = 1024 * 1024) -> str:
+    import blake3
+    hasher = blake3.blake3()
+    with open(path, "rb") as f:
+        f.seek(offset)
+        bytes_remaining = size
+        while bytes_remaining > 0:
+            read_size = min(block_size, bytes_remaining)
+            data = f.read(read_size)
+            if not data:
+                break
+            hasher.update(data)
+            bytes_remaining -= len(data)
+    return hasher.hexdigest()
 
 
 def _new_uuid() -> str:
@@ -92,26 +105,17 @@ async def _encrypted_chunk_stream(
     mime_type: str = "application/octet-stream",
 ) -> AsyncGenerator[bytes, None]:
     """
-    Async generator: read -> compress -> encrypt -> yield 64 KB ciphertext blocks.
-
-    ONE Poly1305 tag covers the entire chunk (appended after the last block).
-    Tag is yielded as the final item. The caller must NOT split the stream
-    mid-chunk -- all sub-blocks must be reassembled before tag verification.
-
-    Spec §5.1 hard constraint: 64 KB generator. No BytesIO buffers.
-    ChaCha20 update() is run via asyncio.to_thread() to stay off main thread.
+    Async generator: read -> encrypt -> yield 64 KB ciphertext blocks using encrypt_chunk_async.
     """
-    encryptor = ChunkEncryptor(key=chunk_key, nonce=nonce)
-
-    raw_stream      = read_chunk_async(path, descriptor.offset, descriptor.size)
-    compress_gen    = compress_stream(raw_stream, mime_type)
-
-    async for block in compress_gen:
-        ct_block = encryptor.update(block)
-        yield ct_block
-
-    tag = encryptor.finalize()
-    yield tag   # ONE Poly1305 tag -- appended after last block
+    from ghostdrive.crypto.chunk_crypto import encrypt_chunk_async
+    async for block in encrypt_chunk_async(
+        key=chunk_key,
+        nonce=nonce,
+        file_path=path,
+        offset=descriptor.offset,
+        size=descriptor.size,
+    ):
+        yield block
 
 
 async def _split_into_sub_blocks(
@@ -154,6 +158,7 @@ class ChunkUploader:
         hkdf_salt: bytes,
         nonce_manager,         # NonceManager instance
         healing_queue=None,
+        active_backends: Optional[dict] = None,
     ) -> None:
         self._db     = db
         self._backend = backend
@@ -162,6 +167,7 @@ class ChunkUploader:
         self._salt    = hkdf_salt
         self._nonces  = nonce_manager
         self._healing_queue = healing_queue
+        self._active_backends = active_backends or {}
 
     async def upload_chunk(
         self,
@@ -227,10 +233,59 @@ class ChunkUploader:
         chunk_id = _new_uuid()
 
         with self._db.transaction():
-            # Reserve quota (raises QuotaReservationError if full)
-            self._qm.reserve(backend_id, quota_reserved)
+            file_row = self._db._conn.execute("SELECT tier FROM files WHERE id = ?", (file_id,)).fetchone()
+        tier = file_row["tier"] if file_row else "IMPORTANT"
+        is_erasure = tier in ("CRITICAL", "IMPORTANT")
 
-            # Check if chunk record already exists (e.g. from retry or multi-backend upload)
+        sub_block_bytes = getattr(self._backend, "sub_block_bytes", _SUB_BLOCK_BYTES)
+        if not isinstance(sub_block_bytes, int) or isinstance(sub_block_bytes, bool):
+            sub_block_bytes = _SUB_BLOCK_BYTES
+            
+        if is_erasure:
+            num_sub_blocks = 6
+        else:
+            num_sub_blocks = max(1, math.ceil(descriptor.size / sub_block_bytes))
+
+        # Check if chunk record already exists outside the transaction to see if we need the hash
+        existing_chunk = self._db.find_chunk_by_file_and_index(file_id, descriptor.chunk_index)
+        
+        blake3_hash = None
+        if not existing_chunk:
+            blake3_hash = await asyncio.to_thread(
+                _compute_blake3_chunk, path, descriptor.offset, descriptor.size
+            )
+        else:
+            blake3_hash = existing_chunk["blake3_hash"]
+
+        with self._db.transaction():
+            # Get active healthy backends list
+            if is_erasure:
+                tier_key = f"routing_{tier.lower()}_backends"
+                routing_ids_str = self._db.get_setting(tier_key, "")
+                routing_ids = [x.strip() for x in routing_ids_str.split(",") if x.strip()]
+
+                backend_rows = self._db._conn.execute(
+                    "SELECT id, type FROM backends WHERE status = 'healthy' ORDER BY priority DESC"
+                ).fetchall()
+
+                if routing_ids:
+                    filtered_rows = [r for r in backend_rows if r["id"] in routing_ids]
+                    if filtered_rows:
+                        backend_rows = filtered_rows
+
+                if not backend_rows:
+                    backend_rows = [{"id": backend_id, "type": getattr(self._backend, 'type', 'unknown')}]
+            else:
+                backend_rows = [{"id": backend_id, "type": getattr(self._backend, 'type', 'unknown')}]
+
+            # Reserve quota on the respective backends
+            for idx in range(num_sub_blocks):
+                b_row = backend_rows[idx % len(backend_rows)]
+                b_id = b_row["id"]
+                sub_quota = quota_reserved if not is_erasure else (quota_reserved // 4 if idx < 4 else 0)
+                self._qm.reserve(b_id, sub_quota)
+
+            # Check again inside the transaction (to be transaction-safe)
             existing_chunk = self._db.find_chunk_by_file_and_index(file_id, descriptor.chunk_index)
             if existing_chunk:
                 chunk_id = existing_chunk["id"]
@@ -249,61 +304,118 @@ class ChunkUploader:
                     "file_id":         file_id,
                     "chunk_index":     descriptor.chunk_index,
                     "total_chunks":    descriptor.total_chunks,
-                    "blake3_hash":     "",   # computed below for dedup -- placeholder
+                    "blake3_hash":     blake3_hash,
                     "size":            descriptor.size,
                     "nonce_counter":   nonce_counter,
-                    "sub_block_count": 1,    # updated after upload
+                    "sub_block_count": num_sub_blocks,
                     "is_manifest":     int(descriptor.is_manifest),
                     "ref_count":       1,
                 })
 
-            # Write pending intent (same transaction as nonce)
-            location_record = {
-                "chunk_id":        chunk_id,
-                "sub_block_index": 0,
-                "backend_id":      backend_id,
-                "reference_id":    "",  # filled in on confirm
-                "url_type":        "permanent",
-                "upload_date":     _now_iso(),
-                "last_verified":   None,
-                "quota_reserved":  quota_reserved,
-            }
-            existing_loc = self._db.find_chunk_location(chunk_id, 0, backend_id)
-            if existing_loc:
-                self._db.update_chunk_location_pending(location_record)
-            else:
-                self._db.insert_chunk_location_pending(location_record)
+            # Write pending intents for all sub-blocks
+            for idx in range(num_sub_blocks):
+                b_row = backend_rows[idx % len(backend_rows)]
+                b_id = b_row["id"]
+                sub_quota = quota_reserved if not is_erasure else (quota_reserved // 4 if idx < 4 else 0)
+                location_record = {
+                    "chunk_id":        chunk_id,
+                    "sub_block_index": idx,
+                    "backend_id":      b_id,
+                    "reference_id":    "",  # filled in on confirm
+                    "url_type":        "permanent",
+                    "upload_date":     _now_iso(),
+                    "last_verified":   None,
+                    "quota_reserved":  sub_quota,
+                }
+                existing_loc = self._db.find_chunk_location(chunk_id, idx, b_id)
+                if existing_loc:
+                    self._db.update_chunk_location_pending(location_record)
+                else:
+                    self._db.insert_chunk_location_pending(location_record)
 
         # 3. Stream: encrypt -> compress -> sub-block -> upload
-        confirmed_sub_blocks: list[tuple[int, str]] = []  # (sub_block_index, reference_id)
+        confirmed_sub_blocks: list[tuple[int, str, str]] = []  # (sub_block_index, reference_id, backend_id)
 
         try:
-            stream        = _encrypted_chunk_stream(path, descriptor, chunk_key, nonce, mime_type)
-            sub_block_bytes = getattr(self._backend, "sub_block_bytes", _SUB_BLOCK_BYTES)
-            if not isinstance(sub_block_bytes, int) or isinstance(sub_block_bytes, bool):
-                sub_block_bytes = _SUB_BLOCK_BYTES
-            sub_block_gen = _split_into_sub_blocks(stream, sub_block_bytes=sub_block_bytes)
+            stream = _encrypted_chunk_stream(path, descriptor, chunk_key, nonce, mime_type)
+            
+            if is_erasure:
+                # Read full encrypted chunk ciphertext
+                chunk_ciphertext = bytearray()
+                async for block in stream:
+                    chunk_ciphertext.extend(block)
+                    
+                padlen = (4 - (len(chunk_ciphertext) % 4)) % 4
+                from zfec.easyfec import Encoder
+                enc = Encoder(4, 6)
+                shards = enc.encode(bytes(chunk_ciphertext))
+                
+                # Update sub_block_count in chunks table to include padlen
+                db_sub_block_count = 6 + padlen * 10
+                with self._db.transaction():
+                    self._db._conn.execute(
+                        "UPDATE chunks SET sub_block_count = ? WHERE id = ?",
+                        (db_sub_block_count, chunk_id)
+                    )
+                
+                sub_blocks_data = shards
+            else:
+                sub_blocks_data = []
+                async for block in _split_into_sub_blocks(stream, sub_block_bytes=sub_block_bytes):
+                    sub_blocks_data.append(block)
 
-            sub_block_index = 0
-            async for sub_block_data in sub_block_gen:
-                async def _byte_gen(data=sub_block_data):
-                    yield data
+            for sub_block_index, sub_block_data in enumerate(sub_blocks_data):
+                b_row = backend_rows[sub_block_index % len(backend_rows)]
+                b_id = b_row["id"]
+                
+                # Retrieve active backend object for the targeted backend
+                b_obj = self._active_backends.get(b_id) or self._active_backends.get(b_row["type"]) or self._backend
+                
+                max_retries = 3
+                base_delay = 1.0
+                reference_id = None
+                
+                for attempt in range(max_retries + 1):
+                    async def _byte_gen(data=sub_block_data):
+                        yield data
 
-                reference_id = await self._backend.upload(
-                    stream=_byte_gen(),
-                    chunk_id=chunk_id,
-                    sub_block_index=sub_block_index,
-                )
-                confirmed_sub_blocks.append((sub_block_index, reference_id))
-                sub_block_index += 1
+                    try:
+                        # Make sure backend is connected
+                        if not getattr(b_obj, "_connected", False):
+                            await b_obj.connect()
+                            b_obj._connected = True
+                            
+                        reference_id = await b_obj.upload(
+                            stream=_byte_gen(),
+                            chunk_id=chunk_id,
+                            sub_block_index=sub_block_index,
+                        )
+                        break  # Success!
+                    except (BackendConnectionError, BackendRateLimitError) as exc:
+                        if attempt == max_retries:
+                            logger.error(
+                                "Failed to upload sub-block %d after %d retries: %s",
+                                sub_block_index, max_retries, exc
+                            )
+                            raise
+                        
+                        delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                        logger.warning(
+                            "Transient upload error (attempt %d/%d) on sub-block %d: %s. Retrying in %.2fs...",
+                            attempt + 1, max_retries + 1, sub_block_index, exc, delay
+                        )
+                        await asyncio.sleep(delay)
+
+                confirmed_sub_blocks.append((sub_block_index, reference_id, b_id))
 
             # 4a. Confirm
             with self._db.transaction():
-                for idx, ref_id in confirmed_sub_blocks:
+                for idx, ref_id, b_id in confirmed_sub_blocks:
                     self._db.confirm_chunk_location(
-                        chunk_id, idx, backend_id, ref_id
+                        chunk_id, idx, b_id, ref_id
                     )
-                self._qm.confirm(backend_id, quota_reserved)
+                    sub_quota = quota_reserved if not is_erasure else (quota_reserved // 4 if idx < 4 else 0)
+                    self._qm.confirm(b_id, sub_quota)
 
             logger.info(
                 "Chunk uploaded: chunk_id=%s index=%d/%d nonce_ctr=%d sub_blocks=%d",
@@ -315,32 +427,42 @@ class ChunkUploader:
         except asyncio.CancelledError:
             # Spec §5.7 cancellation flow
             await self._cleanup_cancelled(
-                chunk_id, backend_id, confirmed_sub_blocks, quota_reserved
+                chunk_id, backend_rows, confirmed_sub_blocks, quota_reserved, num_sub_blocks, is_erasure
             )
             raise  # Always re-raise CancelledError -- never swallow
 
         except (BackendConnectionError, BackendRateLimitError) as exc:
             # 4b. Fail + restore
             with self._db.transaction():
-                self._db.fail_chunk_location(chunk_id, 0, backend_id)
-                self._qm.restore(backend_id, quota_reserved)
+                for idx in range(num_sub_blocks):
+                    b_row = backend_rows[idx % len(backend_rows)]
+                    b_id = b_row["id"]
+                    self._db.fail_chunk_location(chunk_id, idx, b_id)
+                    sub_quota = quota_reserved if not is_erasure else (quota_reserved // 4 if idx < 4 else 0)
+                    self._qm.restore(b_id, sub_quota)
             logger.error("Chunk upload failed (network): %s", exc)
             raise
 
         except Exception as exc:
             # 4b. Fail + restore (unknown error -- never swallow per spec §9.6)
             with self._db.transaction():
-                self._db.fail_chunk_location(chunk_id, 0, backend_id)
-                self._qm.restore(backend_id, quota_reserved)
+                for idx in range(num_sub_blocks):
+                    b_row = backend_rows[idx % len(backend_rows)]
+                    b_id = b_row["id"]
+                    self._db.fail_chunk_location(chunk_id, idx, b_id)
+                    sub_quota = quota_reserved if not is_erasure else (quota_reserved // 4 if idx < 4 else 0)
+                    self._qm.restore(b_id, sub_quota)
             logger.error("Chunk upload failed (unexpected): %s", exc, exc_info=True)
             raise ChunkError(f"Chunk upload failed: {exc}") from exc
 
     async def _cleanup_cancelled(
         self,
         chunk_id: str,
-        backend_id: str,
-        confirmed_sub_blocks: list[tuple[int, str]],
+        backend_rows: list,
+        confirmed_sub_blocks: list[tuple[int, str, str]],
         quota_reserved: int,
+        num_sub_blocks: int,
+        is_erasure: bool,
     ) -> None:
         """
         Cancellation cleanup (spec §5.7):
@@ -350,14 +472,20 @@ class ChunkUploader:
         """
         logger.info("Upload cancelled: chunk_id=%s -- cleaning up.", chunk_id[:8])
 
-        for _, ref_id in confirmed_sub_blocks:
+        for _, ref_id, b_id in confirmed_sub_blocks:
             try:
-                await self._backend.delete(ref_id)
+                # Resolve backend object for deletion
+                b_obj = self._active_backends.get(b_id) or self._backend
+                await b_obj.delete(ref_id)
             except Exception as exc:
                 logger.warning(
                     "Failed to delete sub-block %s on cancel: %s", ref_id, exc
                 )
 
         with self._db.transaction():
-            self._db.cancel_chunk_location(chunk_id, 0, backend_id)
-            self._qm.restore(backend_id, quota_reserved)
+            for idx in range(num_sub_blocks):
+                b_row = backend_rows[idx % len(backend_rows)]
+                b_id = b_row["id"]
+                self._db.cancel_chunk_location(chunk_id, idx, b_id)
+                sub_quota = quota_reserved if not is_erasure else (quota_reserved // 4 if idx < 4 else 0)
+                self._qm.restore(b_id, sub_quota)

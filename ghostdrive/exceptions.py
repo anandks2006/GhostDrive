@@ -1,15 +1,5 @@
 """
 exceptions.py — GhostDrive exception hierarchy.
-
-Exception Handling Philosophy (Spec §9.6)
-==========================================
-- NO silent exception swallowing in upload/download/heal pipeline.
-- Every exception in a pipeline path MUST:
-    (a) retry with backoff if it is a transient network error;
-    (b) mark the chunk status as 'failed' and restore quota_reserved if persistent;
-    (c) escalate to the telemetry panel as WARN or ERROR.
-- ``except Exception: pass`` is a BANNED pattern in all pipeline code.
-- Code review must verify this before Month 2 ends.
 """
 
 
@@ -149,8 +139,7 @@ class BackendNotFoundError(BackendError):
 class BackendDuplicateError(BackendError):
     """
     Duplicate filename conflict on backend.
-    Specifically: GitHub Releases HTTP 422 on duplicate asset name.
-    Handler: delete partial asset, retry with same name.
+    Handler: delete the partial/conflicting asset and retry with the same name.
     """
 
 
@@ -193,3 +182,30 @@ class IndexBootstrapError(GhostDriveError):
     Cold-start index bootstrap failed.
     All configured backends exhausted with no valid snapshot found.
     """
+
+
+# ─── Platform & Secure Erase Errors ──────────────────────────────────────────
+
+class DriveIdentityError(GhostDriveError):
+    """UUID or serial number lookup failed for a drive."""
+
+
+class DriveNotRegisteredError(GhostDriveError):
+    """An operation was requested on an external drive that is not registered."""
+
+
+class SMARTUnavailableError(GhostDriveError):
+    """S.M.A.R.T. monitoring is not available (not installed or lack of privileges)."""
+
+
+class SecureEraseBlockedError(GhostDriveError):
+    """The DestructiveOperationGuard blocked a secure erase request."""
+
+
+class SecureEraseFailedError(GhostDriveError):
+    """A secure erase operation started but did not complete successfully."""
+
+
+class ArtifactCleanError(GhostDriveError):
+    """The OS artifact cleaner encountered an error during audit or clean."""
+

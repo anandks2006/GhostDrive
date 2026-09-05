@@ -16,7 +16,7 @@ Covers:
 
 import hashlib
 import hmac as hmac_module
-import sqlite3
+import sqlcipher3 as sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,10 +26,7 @@ import pytest
 from ghostdrive.database.db import GhostDriveDB
 from ghostdrive.database.fts import FTSIndex
 from ghostdrive.exceptions import (
-    DatabaseError,
     HMACChainError,
-    QuotaReservationError,
-    WALCheckpointError,
 )
 
 
@@ -39,10 +36,12 @@ def _make_db(tmp_path: Path) -> GhostDriveDB:
     """Create and open a fresh test database."""
     ledger_key   = bytes(range(32))          # 32 deterministic bytes
     genesis_seed = bytes(range(32, 64))      # 32 different deterministic bytes
+    master_key   = b"\x00" * 32              # strict master_key
     db = GhostDriveDB(
         path=tmp_path / "test.db",
         ledger_key=ledger_key,
         genesis_seed=genesis_seed,
+        master_key=master_key,
     )
     db.open()
     return db
@@ -235,7 +234,28 @@ class TestHMACLedger:
         db = _make_db(tmp_path)
         try:
             _make_file(db)
+            assert db.verify_hmac_chain(partial_check=True) is True
+            assert db.verify_hmac_chain(partial_check=False) is True
+        finally:
+            db.close()
+
+    def test_verify_hmac_chain_detects_tampering(self, tmp_path):
+        db = _make_db(tmp_path)
+        try:
+            _make_file(db)
             assert db.verify_hmac_chain() is True
+
+            # Tamper with a row in ledger_entries to break the chain
+            db._conn.execute("BEGIN")
+            db._conn.execute(
+                "UPDATE ledger_entries SET row_data = ? WHERE table_name = 'files'",
+                ('{"tampered": true}',),
+            )
+            db._conn.execute("COMMIT")
+            
+            # Full O(N) verification should detect this tampering
+            with pytest.raises(HMACChainError):
+                db.verify_hmac_chain()
         finally:
             db.close()
 
@@ -248,11 +268,11 @@ class TestHMACLedger:
                 "UPDATE hmac_ledger SET last_hmac = ? WHERE id = 1",
                 ("a" * 128,),
             )
-            db._conn.commit()
-            # Chain verification detects the length is OK but the value is wrong
-            # (full replay verification is Month 4 -- this just checks singleton integrity)
-            result = db.verify_hmac_chain()
-            assert result is True  # Singleton check passes (length OK)
+            # Singleton check passes (length OK)
+            assert db.verify_hmac_chain(partial_check=True) is True
+            # Full O(N) check fails
+            with pytest.raises(HMACChainError):
+                db.verify_hmac_chain(partial_check=False)
         finally:
             db.close()
 
@@ -755,3 +775,90 @@ class TestFTS:
         fts = FTSIndex(path=tmp_path / "fts.db")
         with pytest.raises(RuntimeError, match="not open"):
             fts.search("query")
+
+
+class TestSQLCipherSecurity:
+    def test_sqlcipher_encryption_enforced(self, tmp_path):
+        import sqlite3 as standard_sqlite3
+        
+        # 1. Create a database using GhostDriveDB (uses sqlcipher3)
+        db_path = tmp_path / "encrypted.db"
+        ledger_key   = bytes(range(32))
+        genesis_seed = bytes(range(32, 64))
+        master_key   = b"\x42" * 32  # specific key
+        
+        db = GhostDriveDB(
+            path=db_path,
+            ledger_key=ledger_key,
+            genesis_seed=genesis_seed,
+            master_key=master_key,
+        )
+        db.open()
+        
+        # Insert a table/row to verify write
+        with db.transaction():
+            db._conn.execute("CREATE TABLE encrypted_test_table (id INTEGER)")
+            db._conn.execute("INSERT INTO encrypted_test_table VALUES (99)")
+        db.close()
+        
+        # 2. Try opening the DB with standard built-in sqlite3 (which does not support encryption)
+        # Reading from the table should fail with DatabaseError because it's encrypted
+        conn = standard_sqlite3.connect(str(db_path))
+        with pytest.raises(standard_sqlite3.DatabaseError):
+            conn.execute("SELECT * FROM encrypted_test_table").fetchall()
+        conn.close()
+
+    def test_purge_file_permanently_prioritized_reassignment(self, tmp_path):
+        db = _make_db(tmp_path)
+        try:
+            # Create three files:
+            # fid1 is the parent version
+            # fid2 is the child version (sharing history with fid1)
+            # fid3 is an unrelated active file
+            fid1 = _make_file(db)
+            
+            now_str = _now()
+            fid2 = _uuid()
+            with db.transaction():
+                db.insert_file({
+                    "id": fid2, "name": "v2.txt", "path": "/files/v2.txt",
+                    "size": 1024, "mime_type": "text/plain", "tier": "IMPORTANT",
+                    "created_at": now_str, "modified_at": now_str,
+                    "version": 2, "version_of": fid1,
+                    "tombstone": 0, "tombstone_at": None,
+                })
+            
+            _make_file(db)
+            
+            cid = _uuid()
+            with db.transaction():
+                db.insert_chunk({
+                    "id": cid, "file_id": fid1, "chunk_index": 0,
+                    "total_chunks": 1, "blake3_hash": "shared_hash", "size": 1024,
+                    "nonce_counter": 1, "sub_block_count": 1,
+                    "is_manifest": 0, "ref_count": 2,
+                })
+            
+            bid = _make_backend(db)
+            with db.transaction():
+                db.insert_chunk_location_pending({
+                    "chunk_id": cid, "sub_block_index": 0, "backend_id": bid,
+                    "reference_id": "", "url_type": "permanent",
+                    "upload_date": "2026-06-14T00:00:00Z", "last_verified": None,
+                    "quota_reserved": 1024,
+                })
+                db.confirm_chunk_location(cid, 0, bid, "ref1")
+                
+            # Purge fid1 (the parent). The shared chunk has ref_count=2.
+            # It should be re-associated with fid2 (the version chain child) instead of the random/unrelated fid3!
+            with db.transaction():
+                db.purge_file_permanently(fid1)
+                
+            # Verify that the chunk is now associated with fid2
+            chunk_row = db._conn.execute("SELECT file_id, ref_count FROM chunks WHERE id = ?", (cid,)).fetchone()
+            assert chunk_row is not None
+            assert chunk_row["file_id"] == fid2
+            assert chunk_row["ref_count"] == 1
+        finally:
+            db.close()
+

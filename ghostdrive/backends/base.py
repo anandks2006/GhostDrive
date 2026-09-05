@@ -1,51 +1,5 @@
 """
 base.py -- Backend Abstraction Layer (BAL) interface.
-
-Spec §6.1 -- Plugin Interface
-==============================
-Every backend plugin MUST implement this interface exactly.
-The upload pipeline calls these methods only through this interface --
-never directly against a backend's API library.
-
-Method contracts
-----------------
-upload(stream, chunk_id, sub_block_index)
-    Called AFTER:
-      - quota_reserved decremented atomically in backends table
-      - pending intent written to chunk_locations and fsynced
-    Returns reference_id (str). Pipeline updates status -> confirmed.
-    On exception: pipeline sets status -> failed, restores quota_reserved.
-
-download(reference_id)
-    Async bytes generator. Yields raw bytes sub-blocks.
-    Discord: fetches fresh CDN URL via API before download.
-    NEVER returns bytes before auth tag is verified (enforced by caller,
-    not here -- but this method must not buffer and return partial data).
-
-delete(reference_id)
-    Returns bool. Soft-delete: the pipeline marks deletion-pending in
-    the index for 24 h before calling this. Never called directly on
-    user delete -- only after 24 h tombstone window for CRITICAL/IMPORTANT.
-    DISPOSABLE: immediate deletion (no 24 h window).
-
-health_check()
-    Returns HealthResult. Called by the background health daemon only --
-    NEVER on app startup (zero network calls on startup per spec §8.2).
-    IPFS: must verify pin via pinning service API, not just gateway ping.
-
-available_space()
-    Returns int bytes remaining. Hard-capped for S3 backends at free tier
-    limit. Must subtract quota_reserved from raw API value.
-
-Capability flags (set as class attributes)
-------------------------------------------
-supports_range_requests : bool
-supports_streaming       : bool
-supports_deletion        : bool
-is_cold_storage          : bool
-is_ephemeral_url         : bool  -- Discord: store message_id+channel_id only
-ml_artifacts_only        : bool  -- Hugging Face
-cpu_intensive            : bool  -- Mega.nz: deprioritize above 70% CPU
 """
 
 from __future__ import annotations
@@ -64,15 +18,11 @@ class HealthResult:
         reachable:       True if the backend API responded successfully.
         quota_remaining: Remaining free bytes (after subtracting quota_reserved).
                          None if the backend does not report quotas.
-        pin_verified:    For IPFS only: True if pin is confirmed active via
-                         the pinning service API (not just gateway reachability).
-                         None for non-IPFS backends.
         error:           Human-readable error message if not reachable.
         latency_ms:      Round-trip time of the health check in milliseconds.
     """
     reachable:       bool
     quota_remaining: Optional[int] = None
-    pin_verified:    Optional[bool] = None
     error:           Optional[str]  = None
     latency_ms:      Optional[float] = None
 
@@ -80,26 +30,48 @@ class HealthResult:
 class BackendBase(ABC):
     """
     Abstract base class for all GhostDrive backend plugins.
-
-    Spec §6.1 -- all five methods are mandatory. Capability flags are
-    class-level attributes with default values that subclasses override.
     """
 
-    # ── Capability flags (defaults; override in subclass) ─────────────────────
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        
+        # Wrap upload method if defined in the subclass
+        if "upload" in cls.__dict__:
+            orig_upload = cls.upload
+            async def wrapped_upload(self, stream, chunk_id, sub_block_index):
+                from ghostdrive.utils.bandwidth_throttle import UPLOAD_LIMITER, throttle_generator
+                throttled = throttle_generator(stream, UPLOAD_LIMITER)
+                return await orig_upload(self, throttled, chunk_id, sub_block_index)
+            cls.upload = wrapped_upload
+
+        # Wrap download method if defined in the subclass
+        if "download" in cls.__dict__:
+            orig_download = cls.download
+            def wrapped_download(self, reference_id):
+                from ghostdrive.utils.bandwidth_throttle import DOWNLOAD_LIMITER, throttle_generator
+                gen = orig_download(self, reference_id)
+                return throttle_generator(gen, DOWNLOAD_LIMITER)
+            cls.download = wrapped_download
+
     supports_range_requests: bool = False
     supports_streaming:      bool = True
     supports_deletion:       bool = True
     is_cold_storage:         bool = False
-    is_ephemeral_url:        bool = False   # True for Discord
-    ml_artifacts_only:       bool = False   # True for Hugging Face
-    cpu_intensive:           bool = False   # True for Mega.nz
+    is_ephemeral_url:        bool = False
+    ml_artifacts_only:       bool = False
+    cpu_intensive:           bool = False
 
-    # Tier: "CRITICAL", "IMPORTANT", or "DISPOSABLE"
     tier: str = "IMPORTANT"
 
-    # Logical chunk and sub-block sizes for this backend (bytes)
-    logical_chunk_bytes: int = 50 * 1024 * 1024   # 50 MB default
-    sub_block_bytes:     int = 50 * 1024 * 1024   # 50 MB default
+    logical_chunk_bytes: int = 50 * 1024 * 1024
+    sub_block_bytes:     int = 50 * 1024 * 1024
+
+    async def connect(self) -> None:
+        """
+        Establish connection to the backend.
+        Default implementation is a no-op.
+        """
+        pass
 
     @abstractmethod
     async def upload(
@@ -123,7 +95,7 @@ class BackendBase(ABC):
         Returns:
             reference_id: Opaque string the backend uses to locate this
                           sub-block on download (e.g. message_id for Telegram,
-                          asset URL for GitHub, CIDv1 for IPFS).
+                          channel message reference for Discord).
 
         Raises:
             BackendConnectionError: Network unreachable.
@@ -175,8 +147,6 @@ class BackendBase(ABC):
         Called only by the background health daemon (leaky bucket, 1% daily
         chunk sample per backend).
 
-        For IPFS: verifies pin via pinning service API -- not just gateway ping.
-
         Returns:
             HealthResult with reachable, quota_remaining, latency_ms.
         """
@@ -186,8 +156,7 @@ class BackendBase(ABC):
         """
         Return available free space in bytes.
 
-        For S3 backends (B2, R2, Storj): hard-capped at free tier limit.
-        Must subtract quota_reserved from raw API value.
+        Must subtract quota_reserved from the backend's reported value.
 
         Returns:
             Free bytes remaining (after quota_reserved subtraction).

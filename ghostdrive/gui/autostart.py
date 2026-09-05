@@ -2,7 +2,6 @@
 autostart.py -- Platform-agnostic application auto-startup manager.
 """
 
-import os
 import sys
 import platform
 import logging

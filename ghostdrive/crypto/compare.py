@@ -1,21 +1,5 @@
 """
 compare.py — Constant-time comparison utilities.
-
-Spec §4.1 — hmac.compare_digest for all secret comparisons
-===========================================================
-Python ``==`` on ``bytes`` is NOT constant-time and leaks timing information
-to an attacker who can observe how long comparisons take.
-
-ALL secret comparisons in GhostDrive MUST use the functions in this module.
-This covers:
-  - Poly1305 authentication tag verification
-  - BLAKE3 dedup hash comparisons
-  - Passphrase/key comparisons
-  - HMAC ledger chain verification
-  - BIP39 seed phrase checksum verification
-  - Any other comparison involving secret material
-
-Code review MUST verify this before Month 2 ends (Spec §9.6).
 """
 
 import hmac
@@ -47,7 +31,7 @@ def constant_time_compare(a: bytes, b: bytes) -> bool:
     return hmac.compare_digest(a, b)
 
 
-def verify_auth_tag(expected_tag: bytes, actual_tag: bytes) -> bool:
+def verify_auth_tag(computed_tag: bytes, stored_tag: bytes) -> bool:
     """
     Verify a Poly1305 or AES-GCM authentication tag in constant time.
 
@@ -56,8 +40,8 @@ def verify_auth_tag(expected_tag: bytes, actual_tag: bytes) -> bool:
     silently return ``False``.
 
     Args:
-        expected_tag: The tag that was stored alongside the ciphertext.
-        actual_tag:   The tag computed over the received/assembled data.
+        computed_tag: The freshly computed MAC over the received/assembled data.
+        stored_tag:   The tag that was stored alongside the ciphertext at upload time.
 
     Returns:
         ``True`` if tags match, ``False`` otherwise.
@@ -65,16 +49,16 @@ def verify_auth_tag(expected_tag: bytes, actual_tag: bytes) -> bool:
     Raises:
         CryptoError: If tag lengths differ (possible truncation attack).
     """
-    if not isinstance(expected_tag, bytes):
-        raise TypeError(f"expected_tag must be bytes; got {type(expected_tag).__name__!r}")
-    if not isinstance(actual_tag, bytes):
-        raise TypeError(f"actual_tag must be bytes; got {type(actual_tag).__name__!r}")
-    if len(expected_tag) != len(actual_tag):
+    if not isinstance(computed_tag, bytes):
+        raise TypeError(f"computed_tag must be bytes; got {type(computed_tag).__name__!r}")
+    if not isinstance(stored_tag, bytes):
+        raise TypeError(f"stored_tag must be bytes; got {type(stored_tag).__name__!r}")
+    if len(computed_tag) != len(stored_tag):
         raise CryptoError(
-            f"Authentication tag length mismatch: expected {len(expected_tag)} bytes, "
-            f"got {len(actual_tag)} bytes. Possible truncation attack."
+            f"Authentication tag length mismatch: computed {len(computed_tag)} bytes, "
+            f"stored {len(stored_tag)} bytes. Possible truncation attack."
         )
-    return hmac.compare_digest(expected_tag, actual_tag)
+    return hmac.compare_digest(computed_tag, stored_tag)
 
 
 def verify_hmac(expected: bytes, actual: bytes) -> bool:

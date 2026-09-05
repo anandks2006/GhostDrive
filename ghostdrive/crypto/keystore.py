@@ -41,6 +41,7 @@ import ctypes
 import hashlib
 import hmac
 import json
+import logging
 import multiprocessing
 import os
 import secrets
@@ -53,6 +54,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from mnemonic import Mnemonic
 
 from ghostdrive.exceptions import AuthenticationError, CryptoError, KeystoreError
+
+logger = logging.getLogger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -105,13 +108,13 @@ class MasterKeyBuffer:
 
     @property
     def key(self) -> bytes:
-        """Return the Master Key as bytes. DO NOT cache this value."""
+        """Return the Master Key as a bytes copy."""
         if self._zeroed:
             raise KeystoreError(
                 "Master Key buffer has been zeroed. "
                 "Unlock the keystore again before accessing the key."
             )
-        return bytes(self._buf)
+        return self._buf.raw
 
     def zero(self) -> None:
         """Explicitly zero the key material from memory."""
@@ -429,8 +432,8 @@ class KeystoreManager:
 
         # Generate cryptographic material
         master_key   = secrets.token_bytes(MASTER_KEY_BYTES)
-        hkdf_salt    = secrets.token_bytes(HKDF_SALT_BYTES)
-        genesis_seed = secrets.token_bytes(GENESIS_SEED_BYTES)
+        hkdf_salt    = hashlib.sha256(master_key + b"ghostdrive-hkdf-salt-v1").digest()
+        genesis_seed = hashlib.sha256(master_key + b"ghostdrive-hmac-genesis-seed-v1").digest()
 
         # Encode as BIP39 mnemonic
         seed_phrase = entropy_to_mnemonic(master_key)
@@ -510,7 +513,7 @@ class KeystoreManager:
 
     # ── Normal unlock ─────────────────────────────────────────────────────────
 
-    def unlock(self, passphrase: bytes) -> None:
+    def unlock(self, passphrase: bytes | bytearray) -> None:
         """
         Normal unlock: derive keystore_enc_key from passphrase via Argon2id,
         decrypt keystore.json, load Master Key into ctypes buffer.
@@ -519,7 +522,7 @@ class KeystoreManager:
         derivation (Spec §4.3).
 
         Args:
-            passphrase: Raw passphrase bytes.
+            passphrase: Raw passphrase bytes or bytearray.
 
         Raises:
             KeystoreError:       If keystore file does not exist or is malformed.
@@ -591,7 +594,10 @@ class KeystoreManager:
             self._master_key_buf.zero()
             self._master_key_buf = None
 
-        # Overwrite salt and genesis seed references with zeros
+        # NOTE: Python bytes are immutable so we cannot zero the old buffer
+        # in-place. Overwriting the reference drops the last Python reference
+        # to the object; CPython will GC it but timing is not guaranteed.
+        # For maximum security, callers should use bytearray for sensitive data.
         if self._hkdf_salt:
             self._hkdf_salt = b"\x00" * HKDF_SALT_BYTES
             self._hkdf_salt = None
@@ -600,9 +606,12 @@ class KeystoreManager:
             self._genesis_seed = b"\x00" * GENESIS_SEED_BYTES
             self._genesis_seed = None
 
+        # Zero Argon2id parameters (cost parameters could assist timing attacks)
+        self._argon2_params = None
+
     # ── Passphrase change ─────────────────────────────────────────────────────
 
-    def change_passphrase(self, new_passphrase: bytes) -> None:
+    def change_passphrase(self, new_passphrase: bytes | bytearray) -> None:
         """
         Change the keystore passphrase (Spec §4.3 — PASSPHRASE CHANGE).
 
@@ -611,7 +620,7 @@ class KeystoreManager:
         atomically replaces keystore.json.
 
         Args:
-            new_passphrase: New raw passphrase bytes.
+            new_passphrase: New raw passphrase bytes or bytearray.
 
         Raises:
             KeystoreError: If keystore is not unlocked.
@@ -630,6 +639,25 @@ class KeystoreManager:
             argon2_params=new_params,
         )
         self._argon2_params = new_params
+        _zero_if_mutable(new_passphrase)
+
+    def rotate_keys(self, new_salt: bytes, passphrase: bytes | bytearray) -> None:
+        """
+        Rotate the HKDF salt. Re-encrypts the master key with the new salt
+        using the current passphrase.
+        """
+        if not self.is_unlocked:
+            raise KeystoreError("Keystore must be unlocked to rotate keys.")
+            
+        self._write_keystore(
+            master_key=self._master_key_buf.key,
+            hkdf_salt=new_salt,
+            genesis_seed=self._genesis_seed,
+            passphrase=passphrase,
+            argon2_params=self._argon2_params,
+        )
+        self._hkdf_salt = new_salt
+        _zero_if_mutable(passphrase)
 
     # ── Recovery ──────────────────────────────────────────────────────────────
 
@@ -660,17 +688,18 @@ class KeystoreManager:
         """
         master_key = mnemonic_to_entropy(seed_phrase)
 
-        _hkdf_salt    = hkdf_salt    if hkdf_salt    else secrets.token_bytes(HKDF_SALT_BYTES)
-        _genesis_seed = genesis_seed if genesis_seed else secrets.token_bytes(GENESIS_SEED_BYTES)
+        _hkdf_salt    = hkdf_salt    if hkdf_salt    else hashlib.sha256(master_key + b"ghostdrive-hkdf-salt-v1").digest()
+        _genesis_seed = genesis_seed if genesis_seed else hashlib.sha256(master_key + b"ghostdrive-hmac-genesis-seed-v1").digest()
 
         if hkdf_salt is None or genesis_seed is None:
             import warnings
             warnings.warn(
-                "Recovery without hkdf_salt and genesis_seed generates NEW salts. "
-                "All previously encrypted data will be unreachable without the database backup.",
+                "Recovery without hkdf_salt and genesis_seed uses deterministic derivations. "
+                "Legacy installations may have used random salts.",
                 UserWarning,
                 stacklevel=2,
             )
+            logger.info("Recovery: no salt/genesis seed provided. Deriving deterministically from Master Key.")
 
         params = calibrate_argon2id(target_seconds=1.0)
 
@@ -758,11 +787,18 @@ class KeystoreManager:
 
 def _zero_if_mutable(data) -> None:
     """
-    Zero a mutable bytes-like object (bytearray) in place.
-    No-op for immutable ``bytes`` (Python does not allow in-place zeroing).
-    Callers using ``bytes`` passphrase accept that the GC may not zero it
-    immediately; use ``bytearray`` for maximum security.
+    Zero a mutable bytes-like object (bytearray) or CPython bytes object in place.
+    Uses ctypes to overwrite the internal buffer of immutable bytes as a best-effort.
     """
     if isinstance(data, bytearray):
         for i in range(len(data)):
             data[i] = 0
+    elif isinstance(data, bytes):
+        try:
+            length = len(data)
+            if length > 0:
+                # CPython-specific offset for ob_sval in PyBytesObject
+                offset = 32 if ctypes.sizeof(ctypes.c_void_p) == 8 else 16
+                ctypes.memset(id(data) + offset, 0, length)
+        except Exception:
+            pass

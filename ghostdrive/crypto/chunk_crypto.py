@@ -51,7 +51,7 @@ No logical chunk approaches this limit. Documented for future developers.
 import asyncio
 import struct
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Generator
 
 import aiofiles
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms

@@ -1,0 +1,3 @@
+"""
+macOS platform package init.
+"""

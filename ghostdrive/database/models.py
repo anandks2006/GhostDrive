@@ -104,12 +104,10 @@ class BackendRecord:
 
     credentials_ref: Keyring service+account key string -- never the credential
                      itself (spec §4.5). ghostdrive.db stores ONLY this ref.
-    satellite:       Storj-specific: "US1" | "EU1" | "AP1". Locked at first
-                     upload -- never changed after that.
     deprecated_at:   Set when backend is being phased out. New uploads skip it.
     """
     id:               str               # UUIDv4
-    type:             str               # "telegram" | "github" | "discord" | etc.
+    type:             str               # "telegram" | "discord" | "nas" | "local_fs" | "external_drive"
     credentials_ref:  str               # keyring ref, never the credential
     status:           str               # "healthy" | "degraded" | "unreachable" | "deprecated"
     priority:         int               # lower = preferred for upload routing
@@ -119,7 +117,6 @@ class BackendRecord:
     quota_reserved:   int               # bytes currently in-flight
     ml_artifacts_only: bool
     cpu_intensive:    bool
-    satellite:        Optional[str]     # Storj only
     deprecated_at:    Optional[str]     # ISO-8601
 
 
@@ -218,3 +215,133 @@ class IntegrityLogRecord:
     checked_at: str                     # ISO-8601
     result:     str
     backend_id: str                     # UUIDv4 -> backends.id
+
+
+# ── secrets_vault ─────────────────────────────────────────────────────────────
+
+@dataclasses.dataclass
+class SecretsVaultRecord:
+    """
+    One row in the `secrets_vault` table.
+
+    encrypted_blob: AES-256-GCM encrypted JSON payload.
+        Encryption key: HKDF(master_key, info="sloth-secrets-v1", salt=keystore_salt).
+        The plaintext JSON schema varies by kind:
+          password:    {url, username, password, totp_seed?}
+          note:        {markdown_content}
+          api_key:     {service, key_value, expiry?}
+          ssh_key:     {private_key_pem, public_key_pem, fingerprint}
+          seed_phrase: {words}  -- BIP39 or similar
+    """
+    id:             str               # UUIDv4
+    label:          str               # user-visible name
+    kind:           str               # "password"|"note"|"api_key"|"ssh_key"|"seed_phrase"
+    encrypted_blob: bytes             # AES-256-GCM ciphertext
+    created_at:     str               # ISO-8601
+    modified_at:    str               # ISO-8601
+    logical_clock:  int
+
+
+# ── drive_registry ────────────────────────────────────────────────────────────
+
+@dataclasses.dataclass
+class DriveRegistryRecord:
+    """
+    One row in the `drive_registry` table.
+
+    Identity is drive_uuid (filesystem UUID), NOT mountpoint or drive letter.
+    drive_serial is opportunistic -- may be None if elevation was not available.
+    mount_hint is stored only as a UI convenience ("last seen at E:\\") --
+    it is NEVER used as the identity key for reconnection.
+    """
+    backend_id:     str               # UUIDv4 -> backends.id (PRIMARY KEY)
+    drive_uuid:     str               # filesystem-level UUID
+    drive_serial:   Optional[str]     # hardware serial, None if unavailable
+    drive_label:    str               # user-visible label set at registration
+    drive_type:     str               # "ssd"|"hdd"|"nas"|"unknown"
+    capacity_bytes: int
+    mount_hint:     Optional[str]     # last known mountpoint (hint only)
+    registered_at:  str               # ISO-8601
+    last_seen_at:   Optional[str]     # ISO-8601, None until first reconnect
+
+
+# ── smart_history ─────────────────────────────────────────────────────────────
+
+@dataclasses.dataclass
+class SmartHistoryRecord:
+    """
+    One row in the `smart_history` table.
+
+    Pruned to last 30 entries per backend_id via prune_smart_history().
+    ssd_life_pct is None for HDDs (S.M.A.R.T. Attr 231 not applicable).
+    trend is computed by the SmartMonitor trend engine, not stored as raw data.
+    """
+    id:                    str           # UUIDv4
+    backend_id:            str           # UUIDv4 -> backends.id
+    checked_at:            str           # ISO-8601
+    overall_health:        str           # "PASSED"|"FAILED"|"UNKNOWN"
+    reallocated_sectors:   int           # Attr 5
+    pending_sectors:       int           # Attr 197
+    uncorrectable_sectors: int           # Attr 198
+    ssd_life_pct:          Optional[int] # Attr 231, None for HDDs
+    power_on_hours:        Optional[int] # Attr 9
+    temperature_c:         Optional[int] # current temperature
+    assessment:            str           # "healthy"|"degrading"|"critical"|"unknown"
+    trend:                 str           # "stable"|"worsening"|"accelerating"
+
+
+# ── tier_patterns ─────────────────────────────────────────────────────────────
+
+@dataclasses.dataclass
+class TierPatternRecord:
+    """
+    One row in the `tier_patterns` table.
+
+    GhostDrive observes that files in a path always receive the same tier,
+    then records the pattern here. When confidence >= 0.8 and sample_count >= 5,
+    the UI offers to automate the tier assignment (user must confirm -- never
+    auto-applied without explicit user approval).
+    """
+    id:                str           # UUIDv4
+    path_pattern:      str           # glob, e.g. "/home/user/models/*"
+    suggested_tier:    str           # "CRITICAL"|"IMPORTANT"|"DISPOSABLE"
+    confidence:        float         # 0.0 - 1.0
+    sample_count:      int           # files observed matching this pattern
+    created_at:        str           # ISO-8601
+    last_confirmed_at: Optional[str] # ISO-8601, None if user never confirmed
+
+
+# ── destructive_ops_log ───────────────────────────────────────────────────────
+
+@dataclasses.dataclass
+class DestructiveOpsLogRecord:
+    """
+    One row in the `destructive_ops_log` table.
+
+    Append-only, HMAC-chained (same chain pattern as integrity_log).
+    Written in TWO steps:
+      1. Before execution: result='in_progress', completed_at=None
+      2. After execution:  result='completed'|'failed', completed_at=ISO-8601
+
+    target_hash: BLAKE3 of the absolute path string -- raw path is NEVER stored.
+    dry_run_hash: BLAKE3 of the exact dry-run text displayed to the user
+                  before they confirmed. Provides audit proof that the user
+                  saw accurate information before confirming.
+
+    L3 (whole-drive) operations are NOT implemented -- users are directed to
+    manufacturer tools. Only L1 (file overwrite) and L2 (backend removal)
+    are logged here.
+    """
+    id:            str           # UUIDv4
+    op_level:      str           # "L1"|"L2"
+    op_type:       str           # "file_overwrite"|"backend_removal"
+    target_hash:   str           # BLAKE3 hex of target path (privacy)
+    target_label:  str           # human-readable: filename or drive label
+    method:        str           # "software_1pass"|"software_3pass"|"backend_deprecated"
+    initiated_at:  str           # ISO-8601
+    completed_at:  Optional[str] # ISO-8601, None while in_progress
+    result:        str           # "completed"|"failed"|"blocked"|"in_progress"
+    error_detail:  Optional[str] # None on success
+    dry_run_hash:  str           # BLAKE3 hex of dry-run output
+    session_id:    str           # session UUIDv4
+    hmac_chain:    str           # hex HMAC-SHA512

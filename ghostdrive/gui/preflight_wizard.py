@@ -86,7 +86,6 @@ class DiagnosticsWorker(QThread):
         hosts = ["discord.com", "google.com", "api.telegram.org"]
         socket.setdefaulttimeout(3)
         
-        last_exc = None
         for attempt in range(3):
             for host in hosts:
                 try:
@@ -94,18 +93,17 @@ class DiagnosticsWorker(QThread):
                     net_ok = True
                     net_msg = f"Internet reachability verified via {host}."
                     break
-                except Exception as exc:
-                    last_exc = exc
+                except Exception:
+                    pass
             if net_ok:
                 break
             self.msleep(200)
 
         if not net_ok:
-            net_msg = f"Network offline or DNS failed: {last_exc}"
+            net_msg = "Local-Only Pipeline Active"
 
         self.check_completed.emit("network", net_ok, net_msg)
-        if not net_ok:
-            all_passed = False
+        # Network check is informational-only; do not fail diagnostics if offline.
 
         self.msleep(300)
         self.progress.emit(100, "Diagnostics complete.")
@@ -121,8 +119,8 @@ class PreflightWizard(QDialog, ResizingResilientMixin):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("GhostDrive Diagnostics")
-        self.setMinimumSize(450, 420)
-        self.resize(450, 420)
+        self.setMinimumSize(450, 520)
+        self.resize(450, 520)
         self.setWindowFlags(Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
 
         # Layouts
@@ -200,8 +198,12 @@ class PreflightWizard(QDialog, ResizingResilientMixin):
         # Auto start
         QTimer.singleShot(500, self.start_diagnostics)
 
-        # Initialize resizing resiliency framework
-        self.init_resizing_resiliency(450, 420)
+        # Initialize resizing resiliency framework with saved UI preferences
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("GhostDrive", "Preferences")
+        theme = settings.value("theme", "dark", type=str)
+        accent = settings.value("accent_color", "#8b5cf6", type=str)
+        self.init_resizing_resiliency(450, 420, theme, accent)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -234,7 +236,10 @@ class PreflightWizard(QDialog, ResizingResilientMixin):
         elif name == "database":
             self.db_label.setText(f"💽 Database Access: {status_text} ({msg})")
         elif name == "network":
-            self.net_label.setText(f"🌐 Internet Connectivity: {status_text} ({msg})")
+            if success:
+                self.net_label.setText(f"🌐 Internet Connectivity: ✅ Active ({msg})")
+            else:
+                self.net_label.setText("🌐 Internet Connectivity: ℹ️ Local Only")
 
     def _on_finished(self, all_passed: bool) -> None:
         self._worker.quit()

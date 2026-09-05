@@ -4,9 +4,6 @@ healing.py -- Background health checker (leaky bucket) and trickle healing queue
 
 import asyncio
 import logging
-import random
-import time
-from pathlib import Path
 from datetime import datetime, timezone
 import uuid
 
@@ -14,9 +11,9 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ghostdrive.database.db import GhostDriveDB
 from ghostdrive.crypto.nonce import NonceManager
-from ghostdrive.crypto.chunk_crypto import ChunkDecryptor, ChunkEncryptor
+from ghostdrive.crypto.chunk_crypto import ChunkDecryptor
 from ghostdrive.crypto.hkdf import derive_chunk_key
-from ghostdrive.exceptions import AuthenticationError, BackendError
+from ghostdrive.exceptions import AuthenticationError
 from ghostdrive.pipeline.quota import QuotaManager
 
 logger = logging.getLogger("ghostdrive.healing")
@@ -29,7 +26,6 @@ class DaemonSignals(QObject):
     trigger_health_alert = pyqtSignal(int)
 
 def _now_iso() -> str:
-    from datetime import timezone
     return datetime.now(timezone.utc).isoformat()
 
 def _new_uuid() -> str:
@@ -43,61 +39,174 @@ async def verify_chunk_location(
     active_backends: dict
 ) -> str:
     """
-    Downloads and decrypts a chunk location to verify its Poly1305 authentication tag.
-    Returns: 'ok', 'not_found', 'auth_failed', or 'error' (if other/transient errors).
+    Downloads and decrypts all sub-blocks of a chunk sequentially in index order,
+    and verifies the Poly1305 MAC tag only against the end of the completed logical chunk stream.
     """
-    b_type = loc["backend_type"]
-    backend_obj = active_backends.get(b_type)
-    if not backend_obj:
+    chunk_id = loc["chunk_id"]
+    backend_id = loc["backend_id"]
+
+    # Query all confirmed sub-block locations for this chunk_id on this backend
+    with db.transaction():
+        rows = db._conn.execute(
+            """SELECT cl.*, b.type as backend_type FROM chunk_locations cl
+               JOIN backends b ON cl.backend_id = b.id
+               WHERE cl.chunk_id = ? AND cl.backend_id = ? AND cl.status = 'confirmed'
+               ORDER BY cl.sub_block_index ASC""",
+            (chunk_id, backend_id)
+        ).fetchall()
+
+    if not rows:
         return "not_found"
 
-    try:
-        if not getattr(backend_obj, "_connected", False):
-            await backend_obj.connect()
-            backend_obj._connected = True
+    # Get chunk metadata
+    with db.transaction():
+        c_row = db._conn.execute("SELECT sub_block_count, nonce_counter FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+    if not c_row:
+        return "not_found"
+    
+    sub_block_count = c_row["sub_block_count"]
+    nonce_counter = c_row["nonce_counter"]
 
-        # Download the ciphertext blocks without single massive bytearray conversion
-        blocks = []
-        async for block in backend_obj.download(loc["reference_id"]):
-            if block:
-                blocks.append(block)
-
-        if not blocks:
-            return "not_found"
-
-        # Extract 16-byte Poly1305 tag from end of block list
-        tag_parts = []
-        needed = 16
-        for block in reversed(blocks):
-            if len(block) >= needed:
-                tag_parts.append(block[-needed:])
-                needed = 0
-                break
-            else:
-                tag_parts.append(block)
-                needed -= len(block)
-        if needed > 0:
-            return "not_found"
-        tag = b"".join(reversed(tag_parts))
-
-        # Decrypt chunk ciphertext in-memory via block-by-block feed
-        chunk_key = derive_chunk_key(km.master_key, km.hkdf_salt)
-        nonce = NonceManager.counter_to_nonce(loc["nonce_counter"])
-
-        decryptor = ChunkDecryptor(key=chunk_key, nonce=nonce, expected_tag=tag)
-        total_ct_len = sum(len(b) for b in blocks) - 16
-        total_fed = 0
-        for block in blocks:
-            if total_fed + len(block) <= total_ct_len:
-                decryptor.feed(block)
-                total_fed += len(block)
-            else:
-                take = total_ct_len - total_fed
-                if take > 0:
-                    decryptor.feed(block[:take])
-                break
+    if sub_block_count >= 6:
+        # Erasure coding verification
+        with db.transaction():
+            all_rows = db._conn.execute(
+                """SELECT cl.*, b.type as backend_type FROM chunk_locations cl
+                   JOIN backends b ON cl.backend_id = b.id
+                   WHERE cl.chunk_id = ? AND cl.status = 'confirmed'
+                   ORDER BY cl.sub_block_index ASC""",
+                (chunk_id,)
+            ).fetchall()
         
-        # This will raise AuthenticationError if tag is invalid — consume generator to verify and discard plaintext
+        shards_by_idx = {}
+        for r in all_rows:
+            if r["sub_block_index"] not in shards_by_idx:
+                shards_by_idx[r["sub_block_index"]] = r
+                
+        if len(shards_by_idx) < 4:
+            return "not_found"
+            
+        try:
+            downloaded = {}
+            for sub_idx, loc_row in sorted(shards_by_idx.items()):
+                if len(downloaded) >= 4:
+                    break
+                try:
+                    b_obj = active_backends.get(loc_row["backend_id"]) or active_backends.get(loc_row["backend_type"])
+                    if not b_obj:
+                        continue
+                    if not getattr(b_obj, "_connected", False):
+                        await b_obj.connect()
+                        b_obj._connected = True
+                        
+                    blocks_list = []
+                    async for block in b_obj.download(loc_row["reference_id"]):
+                        blocks_list.append(block)
+                    if blocks_list:
+                        downloaded[sub_idx] = b"".join(blocks_list)
+                except Exception as e:
+                    logger.warning("Failed to download shard index %d: %s", sub_idx, e)
+                    
+            if len(downloaded) < 4:
+                return "not_found"
+                
+            padlen = (sub_block_count - 6) // 10
+            blocks = []
+            sharenums = []
+            for sub_idx in sorted(downloaded.keys()):
+                if len(blocks) < 4:
+                    blocks.append(downloaded[sub_idx])
+                    sharenums.append(sub_idx)
+                    
+            from zfec.easyfec import Decoder
+            dec = Decoder(4, 6)
+            chunk_ciphertext = dec.decode(blocks, sharenums, padlen)
+            
+            if len(chunk_ciphertext) < 16:
+                return "not_found"
+                
+            tag = chunk_ciphertext[-16:]
+            ct_body = chunk_ciphertext[:-16]
+            
+            chunk_key = derive_chunk_key(km.master_key, km.hkdf_salt)
+            nonce = NonceManager.counter_to_nonce(nonce_counter)
+            decryptor = ChunkDecryptor(key=chunk_key, nonce=nonce, expected_tag=tag)
+            decryptor.feed(ct_body)
+            
+            def _run_verify(d):
+                for _ in d.verify_and_decrypt_streaming():
+                    pass
+            await asyncio.to_thread(_run_verify, decryptor)
+            return "ok"
+        except Exception as exc:
+            logger.error("Erasure verify failed for chunk %s: %s", chunk_id[:8], exc)
+            return "auth_failed"
+
+    if len(rows) < sub_block_count:
+        return "not_found"
+
+    # Map rows by sub_block_index
+    locs_by_idx = {r["sub_block_index"]: dict(r) for r in rows}
+
+    # Check that we have all indices from 0 to sub_block_count - 1
+    for i in range(sub_block_count):
+        if i not in locs_by_idx:
+            return "not_found"
+
+    try:
+        # Find and download the last sub-block to get the tag
+        last_idx = sub_block_count - 1
+        last_loc = locs_by_idx[last_idx]
+        last_b_type = last_loc["backend_type"]
+        last_backend_obj = active_backends.get(backend_id) or active_backends.get(last_b_type)
+        if not last_backend_obj:
+            return "not_found"
+
+        if not getattr(last_backend_obj, "_connected", False):
+            await last_backend_obj.connect()
+            last_backend_obj._connected = True
+
+        last_blocks = []
+        async for block in last_backend_obj.download(last_loc["reference_id"]):
+            if block:
+                last_blocks.append(block)
+
+        if not last_blocks:
+            return "not_found"
+
+        last_all_ct = b"".join(last_blocks)
+        if len(last_all_ct) < 16:
+            return "not_found"
+
+        tag = last_all_ct[-16:]
+        last_ciphertext_only = last_all_ct[:-16]
+
+        # Initialize decryptor
+        chunk_key = derive_chunk_key(km.master_key, km.hkdf_salt)
+        nonce = NonceManager.counter_to_nonce(nonce_counter)
+        decryptor = ChunkDecryptor(key=chunk_key, nonce=nonce, expected_tag=tag)
+
+        # Feed sub-blocks 0 to N-2
+        for i in range(last_idx):
+            curr_loc = locs_by_idx[i]
+            curr_b_type = curr_loc["backend_type"]
+            curr_backend_obj = active_backends.get(curr_loc["backend_id"]) or active_backends.get(curr_b_type)
+            if not curr_backend_obj:
+                return "not_found"
+
+            if not getattr(curr_backend_obj, "_connected", False):
+                await curr_backend_obj.connect()
+                curr_backend_obj._connected = True
+
+            async for block in curr_backend_obj.download(curr_loc["reference_id"]):
+                if block:
+                    decryptor.feed(block)
+
+        # Feed the last sub-block's ciphertext
+        if last_ciphertext_only:
+            decryptor.feed(last_ciphertext_only)
+
+        # Verify the MAC tag
         def _run_verify(d):
             for _ in d.verify_and_decrypt_streaming():
                 pass
@@ -105,15 +214,15 @@ async def verify_chunk_location(
         return "ok"
 
     except AuthenticationError as exc:
-        logger.error("Auth verification failed for chunk %s on %s: %s", loc["chunk_id"][:8], b_type, exc)
+        logger.error("Auth verification failed for chunk %s on %s: %s", chunk_id[:8], last_b_type, exc)
         return "auth_failed"
     except Exception as exc:
         exc_str = str(exc).lower()
         if "not found" in exc_str or "404" in exc_str or "does not exist" in exc_str:
-            logger.error("Chunk %s not found on %s: %s", loc["chunk_id"][:8], b_type, exc)
+            logger.error("Chunk %s not found on backend: %s", chunk_id[:8], exc)
             return "not_found"
         else:
-            logger.warning("Transient/network error verifying chunk %s on %s: %s", loc["chunk_id"][:8], b_type, exc)
+            logger.warning("Transient/network error verifying chunk %s: %s", chunk_id[:8], exc)
             return "error"
 
 
@@ -195,7 +304,10 @@ class HealthDaemon:
         # Update alerts based on healthy count
         await self._evaluate_backend_alerts()
 
-        # 2. Check Chunk 0 of all active (non-tombstoned) files
+        # 2. Check Chunk 0 of all active (non-tombstoned) files.
+        # Apply a 24-hour cooldown per location so we don't re-download every
+        # chunk on every 30-second sweep cycle. A NULL last_verified means
+        # this location has never been verified and must be checked immediately.
         try:
             with self.db.transaction():
                 chunk0_locs = self.db._conn.execute(
@@ -204,7 +316,13 @@ class HealthDaemon:
                        JOIN chunks c ON cl.chunk_id = c.id
                        JOIN files f ON c.file_id = f.id
                        JOIN backends b ON cl.backend_id = b.id
-                       WHERE f.tombstone = 0 AND c.chunk_index = 0 AND cl.status = 'confirmed'"""
+                       WHERE f.tombstone = 0
+                         AND c.chunk_index = 0
+                         AND cl.status = 'confirmed'
+                         AND (
+                               cl.last_verified IS NULL
+                            OR cl.last_verified < datetime('now', '-1 day')
+                         )"""
                 ).fetchall()
         except Exception as exc:
             logger.error("Failed to query Chunk 0 locations: %s", exc)
@@ -215,34 +333,52 @@ class HealthDaemon:
             res = await verify_chunk_location(self.db, loc, self.km, self.active_backends)
             await self._record_verification_result(loc, res)
 
-        # 3. Leaky bucket 1% daily sweep
+        # 3. Leaky-bucket 1% daily sweep.
+        # Sample at SQL level to avoid loading all chunk_location rows into memory
+        # (a large vault can have millions of rows — fetchall() would OOM).
+        # We compute 1% of total confirmed locations and pull that many random rows.
         try:
             with self.db.transaction():
-                all_locs = self.db._conn.execute(
-                    """SELECT cl.*, c.nonce_counter, c.size, f.name as file_name, b.type as backend_type
-                       FROM chunk_locations cl
-                       JOIN chunks c ON cl.chunk_id = c.id
-                       JOIN files f ON c.file_id = f.id
-                       JOIN backends b ON cl.backend_id = b.id
-                       WHERE f.tombstone = 0 AND cl.status = 'confirmed'"""
-                ).fetchall()
-        except Exception as exc:
-            logger.error("Failed to query all chunk locations for leaky bucket check: %s", exc)
-            all_locs = []
+                total_row = self.db._conn.execute(
+                    "SELECT COUNT(*) as cnt FROM chunk_locations cl "
+                    "JOIN files f ON (SELECT file_id FROM chunks WHERE id = cl.chunk_id) = f.id "
+                    "WHERE f.tombstone = 0 AND cl.status = 'confirmed'"
+                ).fetchone()
+                total_count = total_row["cnt"] if total_row else 0
+                sample_limit = max(1, int(total_count * 0.01)) if total_count > 0 else 0
 
-        # Group by backend
+                if sample_limit > 0:
+                    sampled_rows = self.db._conn.execute(
+                        """SELECT cl.*, c.nonce_counter, c.size, f.name as file_name, b.type as backend_type
+                           FROM chunk_locations cl
+                           JOIN chunks c ON cl.chunk_id = c.id
+                           JOIN files f ON c.file_id = f.id
+                           JOIN backends b ON cl.backend_id = b.id
+                           WHERE f.tombstone = 0
+                             AND cl.status = 'confirmed'
+                             AND (
+                                   cl.last_verified IS NULL
+                                OR cl.last_verified < datetime('now', '-1 day')
+                             )
+                           ORDER BY RANDOM()
+                           LIMIT ?""",
+                        (sample_limit,)
+                    ).fetchall()
+                else:
+                    sampled_rows = []
+        except Exception as exc:
+            logger.error("Failed to sample chunk locations for leaky bucket check: %s", exc)
+            sampled_rows = []
+
+        # Group sampled rows by backend for rate-limit-friendly verification
         by_backend = {}
-        for r in all_locs:
+        for r in sampled_rows:
             by_backend.setdefault(r["backend_id"], []).append(dict(r))
 
         for b_id, locs in by_backend.items():
-            # Sample 1% (at least 1, if any exist)
-            sample_size = int(len(locs) * 0.01)
-            if sample_size == 0 and len(locs) > 0:
-                sample_size = 1
-            
-            sampled = random.sample(locs, sample_size)
-            for loc in sampled:
+            # SQL already applied 1% sampling (ORDER BY RANDOM() LIMIT) so verify
+            # every row in locs directly — no further Python-side sampling needed.
+            for loc in locs:
                 res = await verify_chunk_location(self.db, loc, self.km, self.active_backends)
                 await self._record_verification_result(loc, res)
 
@@ -297,15 +433,30 @@ class HealthDaemon:
                 )
 
     async def _evaluate_backend_alerts(self) -> None:
-        """Counts active healthy backends and reports appropriate UI alert triggers."""
+        """Counts active healthy backends and reports appropriate UI alert triggers.
+        
+        Guards against firing alerts when no backends are configured at all
+        (fresh install / pre-setup state). Alerts only make sense when a
+        *previously working* backend becomes unreachable.
+        """
         try:
             with self.db.transaction():
-                rows = self.db._conn.execute(
+                total_row = self.db._conn.execute(
+                    "SELECT COUNT(*) as cnt FROM backends"
+                ).fetchone()
+                total_configured = total_row["cnt"] if total_row else 0
+
+                healthy_row = self.db._conn.execute(
                     "SELECT COUNT(*) as cnt FROM backends WHERE status = 'healthy'"
                 ).fetchone()
-                healthy_count = rows["cnt"] if rows else 0
+                healthy_count = healthy_row["cnt"] if healthy_row else 0
         except Exception:
-            healthy_count = 0
+            return
+
+        # Never alert if no backends have been configured yet.
+        # The blocking modal is only meaningful when a configured backend goes down.
+        if total_configured == 0:
+            return
 
         # Emit Qt signal to trigger health alert UI on the main thread
         self.signals.trigger_health_alert.emit(healthy_count)
@@ -385,7 +536,7 @@ class HealingQueue:
 
                 candidates = self.db._conn.execute(
                     """SELECT c.id as chunk_id, c.size, c.nonce_counter, f.name as file_name, f.tier,
-                              (SELECT COUNT(*) FROM chunk_locations cl WHERE cl.chunk_id = c.id AND cl.status = 'confirmed') as confirmed_count
+                              (SELECT COUNT(DISTINCT cl.backend_id) FROM chunk_locations cl WHERE cl.chunk_id = c.id AND cl.status = 'confirmed') as confirmed_count
                        FROM chunks c
                        JOIN files f ON c.file_id = f.id
                        WHERE f.tombstone = 0
@@ -402,9 +553,20 @@ class HealingQueue:
             file_name = row["file_name"]
 
             # Map tier target replication
-            target_rep = 4 if tier == "CRITICAL" else (3 if tier == "IMPORTANT" else 2)
-            # Replicating up to max available healthy backends
-            max_possible = min(target_rep, len(healthy_ids))
+            critical_rep = int(self.db.get_setting("rep_critical", "4"))
+            important_rep = int(self.db.get_setting("rep_important", "3"))
+            disposable_rep = int(self.db.get_setting("rep_disposable", "2"))
+            target_rep = critical_rep if tier == "CRITICAL" else (important_rep if tier == "IMPORTANT" else disposable_rep)
+            
+            # Map tier target routing policy
+            tier_key = f"routing_{tier.lower()}_backends"
+            routing_ids_str = self.db.get_setting(tier_key, "")
+            routing_ids = [x.strip() for x in routing_ids_str.split(",") if x.strip()]
+            
+            allowed_ids = [b_id for b_id in healthy_ids if b_id in routing_ids] if routing_ids else healthy_ids
+
+            # Replicating up to max available allowed healthy backends
+            max_possible = min(target_rep, len(allowed_ids))
 
             if confirmed_count >= max_possible or confirmed_count == 0:
                 continue
@@ -429,15 +591,15 @@ class HealingQueue:
             if not sources:
                 continue
 
-            # Pick target backend (must be healthy and not in excl_ids and not busy healing)
+            # Pick target backend (must be healthy and allowed by routing policy, not in excl_ids, and not busy healing)
             target_backend = None
-            for b_id in healthy_ids:
+            for b_id in allowed_ids:
                 if b_id not in excl_ids and b_id not in self._active_healing_backends:
                     # Retrieve backend object
                     with self.db.transaction():
                         b_row = self.db._conn.execute("SELECT type FROM backends WHERE id = ?", (b_id,)).fetchone()
                     if b_row:
-                        b_obj = self.active_backends.get(b_row["type"])
+                        b_obj = self.active_backends.get(b_id) or self.active_backends.get(b_row["type"])
                         if b_obj:
                             target_backend = (b_id, b_row["type"], b_obj)
                             break
@@ -470,104 +632,157 @@ class HealingQueue:
 
     async def _heal_chunk_record(self, chunk_id: str, size: int, nonce_counter: int, source_loc: dict, target_backend: tuple) -> None:
         target_id, target_type, target_obj = target_backend
-        source_type = source_loc["backend_type"]
-        source_obj = self.active_backends.get(source_type)
-        if not source_obj:
-            raise ValueError(f"Source backend {source_type} not available.")
+        
+        # To verify the entire chunk integrity, we must download all sub-blocks
+        # Query all confirmed source locations for this chunk
+        with self.db.transaction():
+            rows = self.db._conn.execute(
+                """SELECT cl.*, b.type as backend_type FROM chunk_locations cl
+                   JOIN backends b ON cl.backend_id = b.id
+                   WHERE cl.chunk_id = ? AND cl.status = 'confirmed'
+                   ORDER BY cl.sub_block_index ASC""",
+                (chunk_id,)
+            ).fetchall()
 
-        # 1. Download ciphertext blocks
-        if not getattr(source_obj, "_connected", False):
-            await source_obj.connect()
-            source_obj._connected = True
+        if not rows:
+            raise ValueError(f"No confirmed source locations found for chunk {chunk_id[:8]}")
 
-        blocks = []
-        async for block in source_obj.download(source_loc["reference_id"]):
+        # Get chunk metadata
+        with self.db.transaction():
+            c_row = self.db._conn.execute("SELECT sub_block_count FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+        if not c_row:
+            raise ValueError(f"Chunk {chunk_id[:8]} not found in chunks table.")
+        
+        sub_block_count = c_row["sub_block_count"]
+
+        # Map rows by sub_block_index. Pick first confirmed location per index.
+        locs_by_idx = {}
+        for r in rows:
+            idx = r["sub_block_index"]
+            if idx not in locs_by_idx:
+                locs_by_idx[idx] = dict(r)
+
+        # Check we have all indices
+        for i in range(sub_block_count):
+            if i not in locs_by_idx:
+                raise ValueError(f"Missing confirmed source location for sub-block {i} of chunk {chunk_id[:8]}")
+
+        # Download the last sub-block first to get the tag
+        last_idx = sub_block_count - 1
+        last_loc = locs_by_idx[last_idx]
+        last_source_type = last_loc["backend_type"]
+        last_source_obj = self.active_backends.get(last_loc["backend_id"]) or self.active_backends.get(last_source_type)
+        if not last_source_obj:
+            raise ValueError(f"Source backend {last_source_type} not available.")
+
+        if not getattr(last_source_obj, "_connected", False):
+            await last_source_obj.connect()
+            last_source_obj._connected = True
+
+        last_blocks = []
+        async for block in last_source_obj.download(last_loc["reference_id"]):
             if block:
-                blocks.append(block)
+                last_blocks.append(block)
 
-        if not blocks:
-            raise ValueError("Empty ciphertext received from source backend.")
+        if not last_blocks:
+            raise ValueError("Empty ciphertext received from last sub-block source backend.")
 
-        # Extract 16-byte Poly1305 tag from end of blocks list
-        tag_parts = []
-        needed = 16
-        for block in reversed(blocks):
-            if len(block) >= needed:
-                tag_parts.append(block[-needed:])
-                needed = 0
-                break
-            else:
-                tag_parts.append(block)
-                needed -= len(block)
-        if needed > 0:
-            raise ValueError("Ciphertext too small to contain a tag.")
-        tag = b"".join(reversed(tag_parts))
+        last_all_ct = b"".join(last_blocks)
+        if len(last_all_ct) < 16:
+            raise ValueError("Last sub-block ciphertext too small to contain a tag.")
 
-        # 2. Verify decryption (MAC Tag check)
+        tag = last_all_ct[-16:]
+        last_ciphertext_only = last_all_ct[:-16]
+
+        # Keep track of all sub-block ciphertexts for upload
+        all_sub_block_ciphertexts = {}
+        all_sub_block_ciphertexts[last_idx] = last_blocks
+        
+        # Initialize decryptor for verification
         chunk_key = derive_chunk_key(self.km.master_key, self.km.hkdf_salt)
         nonce = NonceManager.counter_to_nonce(nonce_counter)
-
         decryptor = ChunkDecryptor(key=chunk_key, nonce=nonce, expected_tag=tag)
-        total_ct_len = sum(len(b) for b in blocks) - 16
-        total_fed = 0
-        for block in blocks:
-            if total_fed + len(block) <= total_ct_len:
-                decryptor.feed(block)
-                total_fed += len(block)
-            else:
-                take = total_ct_len - total_fed
-                if take > 0:
-                    decryptor.feed(block[:take])
-                break
 
-        # Consume generator to verify tag and discard decrypted plaintext
+        # Download and feed sub-blocks 0 to N-2
+        for i in range(last_idx):
+            curr_loc = locs_by_idx[i]
+            curr_source_type = curr_loc["backend_type"]
+            curr_source_obj = self.active_backends.get(curr_loc["backend_id"]) or self.active_backends.get(curr_source_type)
+            if not curr_source_obj:
+                raise ValueError(f"Source backend {curr_source_type} not available.")
+
+            if not getattr(curr_source_obj, "_connected", False):
+                await curr_source_obj.connect()
+                curr_source_obj._connected = True
+
+            curr_blocks = []
+            async for block in curr_source_obj.download(curr_loc["reference_id"]):
+                if block:
+                    curr_blocks.append(block)
+                    decryptor.feed(block)
+
+            all_sub_block_ciphertexts[i] = curr_blocks
+
+        # Feed the last sub-block's ciphertext
+        if last_ciphertext_only:
+            decryptor.feed(last_ciphertext_only)
+
+        # Verify the tag
         def _run_verify(d):
             for _ in d.verify_and_decrypt_streaming():
                 pass
         await asyncio.to_thread(_run_verify, decryptor)
 
-        # 3. Reserve quota on target backend and insert pending location record within a single transaction context
+        # 3. Reserve quota on target backend and insert pending location records for all sub-blocks
         qm = QuotaManager(self.db)
         with self.db.transaction():
             ok = self.db.reserve_quota(target_id, size)
             if not ok:
                 raise ValueError(f"Insufficient quota on target backend {target_id[:8]}")
-            self.db._conn.execute(
-                """INSERT INTO chunk_locations
-                   (chunk_id, sub_block_index, backend_id, reference_id, url_type,
-                    upload_date, status, quota_reserved)
-                   VALUES (?, 0, ?, '', 'permanent', ?, 'pending', ?)""",
-                (chunk_id, target_id, _now_iso(), size)
-            )
+            
+            for idx in range(sub_block_count):
+                sub_quota = size if idx == 0 else 0
+                self.db._conn.execute(
+                    """INSERT INTO chunk_locations
+                       (chunk_id, sub_block_index, backend_id, reference_id, url_type,
+                        upload_date, status, quota_reserved)
+                       VALUES (?, ?, ?, '', 'permanent', ?, 'pending', ?)""",
+                    (chunk_id, idx, target_id, _now_iso(), sub_quota)
+                )
 
-        # 5. Upload same ciphertext blocks
+        # 5. Upload all sub-blocks
         if not getattr(target_obj, "_connected", False):
             await target_obj.connect()
             target_obj._connected = True
 
         try:
-            # We stream the exact same ciphertext blocks
-            async def _stream_data(blocks_list=blocks):
-                for b in blocks_list:
-                    yield b
+            for idx in range(sub_block_count):
+                blocks_list = all_sub_block_ciphertexts[idx]
+                
+                async def _stream_data(bl=blocks_list):
+                    for b in bl:
+                        yield b
 
-            ref_id = await target_obj.upload(
-                stream=_stream_data(),
-                chunk_id=chunk_id,
-                sub_block_index=0
-            )
-
-            # 6. Confirm location and quota
-            with self.db.transaction():
-                self.db._conn.execute(
-                    """UPDATE chunk_locations
-                       SET status = 'confirmed', reference_id = ?, quota_reserved = 0
-                       WHERE chunk_id = ? AND sub_block_index = 0 AND backend_id = ?""",
-                    (ref_id, chunk_id, target_id)
+                ref_id = await target_obj.upload(
+                    stream=_stream_data(),
+                    chunk_id=chunk_id,
+                    sub_block_index=idx
                 )
+
+                # Confirm each sub-block location
+                with self.db.transaction():
+                    self.db._conn.execute(
+                        """UPDATE chunk_locations
+                           SET status = 'confirmed', reference_id = ?, quota_reserved = 0
+                           WHERE chunk_id = ? AND sub_block_index = ? AND backend_id = ?""",
+                        (ref_id, chunk_id, idx, target_id)
+                    )
+            
+            # Confirm quota after all sub-blocks are successfully uploaded
+            with self.db.transaction():
                 qm.confirm(target_id, size)
 
-            logger.info("Successfully healed/replicated chunk %s to target backend %s.", chunk_id[:8], target_type)
+            logger.info("Successfully healed/replicated chunk %s (all %d sub-blocks) to target backend %s.", chunk_id[:8], sub_block_count, target_type)
             
             # Emit Qt signals to refresh UI on main thread safely
             if hasattr(self.main_view, 'healing_completed'):
@@ -576,13 +791,14 @@ class HealingQueue:
                 self.main_view.backends_changed.emit()
 
         except Exception as exc:
-            # Restore quota and fail location on error
+            # Restore quota and fail all locations on error
             with self.db.transaction():
-                self.db._conn.execute(
-                    """UPDATE chunk_locations
-                       SET status = 'failed', quota_reserved = 0
-                       WHERE chunk_id = ? AND sub_block_index = 0 AND backend_id = ?""",
-                    (chunk_id, target_id)
-                )
+                for idx in range(sub_block_count):
+                    self.db._conn.execute(
+                        """UPDATE chunk_locations
+                           SET status = 'failed', quota_reserved = 0
+                           WHERE chunk_id = ? AND sub_block_index = ? AND backend_id = ?""",
+                        (chunk_id, idx, target_id)
+                    )
                 qm.restore(target_id, size)
             raise exc

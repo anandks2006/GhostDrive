@@ -1,8 +1,13 @@
 # ─── Credentials & secrets ────────────────────────────────────────────────────
 # NEVER commit these to git. They contain your API keys, phone number,
 # and Telegram session tokens.
+#
+# To add your credentials, use GhostDrive's backend settings wizard inside
+# the app (Settings → Backends). Credentials are stored encrypted in your
+# OS keyring (DPAPI on Windows / libsecret on Linux / Keychain on macOS)
+# and are NEVER written to any tracked file.
 
-# Telegram MTProto session files
+# Telegram MTProto session files — ALL .session files are excluded
 *.session
 *.session-journal
 ghostdrive_test.session
@@ -11,6 +16,7 @@ ghostdrive_integration.session
 # Credential files (filled in locally, never committed)
 telegram_credentials.py
 discord_credentials.py
+*_credentials.py
 
 # PoC / scratch files that contain credentials or are superseded by the real backend
 discord_test.py
@@ -19,9 +25,12 @@ discord_test.py
 GhostDrive_ProjectSpec_v1.2.txt
 GhostDrive_ProjectSpec_*.txt
 
-# GhostDrive keystore (contains your encrypted Master Key)
+# GhostDrive keystore and nonce counter (machine-local, generated at first run)
 keystore.json
 nonce_counter.json
+
+# Nonce counter storage directory
+.nonces/
 
 # Config files that may hold credentials
 config.ini

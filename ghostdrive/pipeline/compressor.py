@@ -1,20 +1,9 @@
 """
 compressor.py -- zstd compression for the upload pipeline.
-
-Spec §5.1, §5.9
-================
-- Compression level: 3 (FIXED CONSTANT -- NEVER user-configurable).
-  Dedup hash is computed on the original bytes BEFORE compression.
-  Changing the level on different devices would NOT break dedup (hash is
-  pre-compression), but a fixed level ensures consistent size estimates.
-- Pre-compressed MIME types are SKIPPED (compressing them wastes CPU and
-  usually increases size slightly).
-- Streaming: yields compressed blocks without buffering the full chunk.
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import AsyncGenerator
 
 import zstandard as zstd

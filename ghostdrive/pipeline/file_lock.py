@@ -36,7 +36,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from ghostdrive.exceptions import FileLockError
 
 logger = logging.getLogger(__name__)
 

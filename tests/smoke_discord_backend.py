@@ -122,7 +122,7 @@ async def _run_smoke_test(interactive: bool = True) -> None:
     print(f"  Logical chunk:   {backend.logical_chunk_bytes // 1024 // 1024} MB")
     print(f"  Sub-block:       {backend.sub_block_bytes // 1024 // 1024} MB")
     print(f"  is_ephemeral_url: {backend.is_ephemeral_url}  (fresh CDN URL fetched at download)")
-    print(f"  Credentials ref: OS keyring service='ghostdrive' / discord_credentials.py")
+    print("  Credentials ref: OS keyring service='ghostdrive' / discord_credentials.py")
 
     await backend.disconnect()
     print("\n[*] Disconnected.")

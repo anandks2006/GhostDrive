@@ -47,8 +47,8 @@ try:
 except ImportError:
     _CREDS_AVAILABLE = False
 
-from ghostdrive.backends.telegram_backend import TelegramBackend
-from ghostdrive.exceptions import BackendAuthError
+from ghostdrive.backends.telegram_backend import TelegramBackend  # noqa: E402
+from ghostdrive.exceptions import BackendAuthError  # noqa: E402
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -187,12 +187,12 @@ async def _run_interactive():
         print("[PASS] upload -> download -> delete cycle verified.")
         print("[PASS] Byte-perfect integrity confirmed.")
         print("[PASS] Session stored in OS keyring (not .session file, not plaintext).")
-        print(f"\nSpec compliance:")
+        print("\nSpec compliance:")
         print(f"  Tier:            {backend.tier}")
         print(f"  Logical chunk:   {backend.logical_chunk_bytes // 1024 // 1024} MB")
         print(f"  Sub-block:       {backend.sub_block_bytes // 1024 // 1024} MB")
-        print(f"  force_document:  True (exact bytes, no Telegram compression)")
-        print(f"  Session storage: OS keyring (DPAPI/libsecret/Keychain)")
+        print("  force_document:  True (exact bytes, no Telegram compression)")
+        print("  Session storage: OS keyring (DPAPI/libsecret/Keychain)")
 
     finally:
         await backend.disconnect()

@@ -19,14 +19,8 @@ All secret comparisons use hmac.compare_digest (enforced by test structure).
 No 'except Exception: pass' anywhere in these tests.
 """
 
-import asyncio
-import hashlib
-import hmac
 import json
 import os
-import struct
-import tempfile
-from pathlib import Path
 
 import pytest
 from hypothesis import given, settings
@@ -42,7 +36,6 @@ from ghostdrive.crypto.chunk_crypto import (
     ChunkDecryptor,
     ChunkEncryptor,
     _derive_poly1305_key,
-    _make_chacha20_encryptor,
     encrypt_chunk_async,
 )
 from ghostdrive.crypto.compare import (
@@ -53,13 +46,11 @@ from ghostdrive.crypto.compare import (
 )
 from ghostdrive.crypto.hkdf import (
     INFO_CHUNK_ENCRYPTION,
-    INFO_CLI_SESSION,
     INFO_INDEX_BACKUP_NAME,
     INFO_INDEX_MAC,
     INFO_KEYSTORE_ENC,
     INFO_SHARE_KEY,
     derive_chunk_key,
-    derive_cli_session_key,
     derive_index_backup_name,
     derive_index_mac_key,
     derive_keystore_enc_key,
@@ -76,12 +67,11 @@ from ghostdrive.crypto.keystore import (
     entropy_to_mnemonic,
     mnemonic_to_entropy,
 )
-from ghostdrive.crypto.nonce import MAX_NONCE_COUNTER, NONCE_BYTES, NonceManager
+from ghostdrive.crypto.nonce import NONCE_BYTES, NonceManager
 from ghostdrive.exceptions import (
     AuthenticationError,
     CryptoError,
     KeystoreError,
-    NonceExhaustedError,
 )
 
 
@@ -101,12 +91,11 @@ class TestHKDF:
         INFO_KEYSTORE_ENC,
         INFO_SHARE_KEY,
         INFO_INDEX_BACKUP_NAME,
-        INFO_CLI_SESSION,
     ]
 
     # ── Correctness ──────────────────────────────────────────────────────────
 
-    def test_all_six_info_strings_produce_distinct_subkeys(self):
+    def test_all_five_info_strings_produce_distinct_subkeys(self):
         """Different info strings MUST produce different subkeys (Spec §4.2)."""
         subkeys = [
             derive_subkey(self._KEY, self._SALT, info)
@@ -162,15 +151,6 @@ class TestHKDF:
     def test_index_backup_name_is_32_bytes(self):
         assert len(derive_index_backup_name(self._KEY, self._SALT)) == 32
 
-    def test_cli_session_key_is_32_bytes(self):
-        session_salt = os.urandom(32)
-        key = derive_cli_session_key(self._KEY, self._SALT, session_salt)
-        assert len(key) == 32
-
-    def test_cli_session_key_different_per_session_salt(self):
-        k1 = derive_cli_session_key(self._KEY, self._SALT, os.urandom(32))
-        k2 = derive_cli_session_key(self._KEY, self._SALT, os.urandom(32))
-        assert k1 != k2
 
     # ── Input validation ─────────────────────────────────────────────────────
 
@@ -790,7 +770,8 @@ class TestKeystoreManager:
 
     def _create_and_unlock(self, path, passphrase=b"test_pass"):
         mgr    = KeystoreManager(path)
-        phrase = mgr.create_new(passphrase, calibrate=False, argon2_params=FAST_ARGON2_PARAMS)
+        pass_copy = bytes(bytearray(passphrase))
+        phrase = mgr.create_new(pass_copy, calibrate=False, argon2_params=FAST_ARGON2_PARAMS)
         mgr.verify_and_save(phrase)
         return mgr, phrase
 
@@ -897,7 +878,7 @@ class TestKeystoreManager:
         mgr, _     = self._create_and_unlock(tmp_keystore_path, passphrase)
         original_key = mgr.master_key
 
-        mgr.change_passphrase(b"new_passphrase")
+        mgr.change_passphrase(bytes(bytearray(b"new_passphrase")))
         mgr.lock()
 
         # Old passphrase must fail
@@ -907,7 +888,7 @@ class TestKeystoreManager:
 
         # New passphrase must succeed with same Master Key
         mgr3 = KeystoreManager(tmp_keystore_path)
-        mgr3.unlock(b"new_passphrase")
+        mgr3.unlock(bytes(bytearray(b"new_passphrase")))
         assert mgr3.master_key == original_key
 
     def test_change_passphrase_while_locked_raises(self, tmp_keystore_path):

@@ -4,18 +4,14 @@ test_healing.py -- Unit and integration tests for background health checking and
 
 import sys
 import asyncio
-import uuid
 import pytest
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime
 
 from PyQt6.QtWidgets import QApplication
 
 from ghostdrive.database.db import GhostDriveDB
 from ghostdrive.crypto.keystore import KeystoreManager
 from ghostdrive.pipeline.healing import HealthDaemon, HealingQueue, verify_chunk_location
-from ghostdrive.gui.main_view import MainWindow
 from ghostdrive.exceptions import AuthenticationError
 
 @pytest.fixture(scope="session")
@@ -31,6 +27,7 @@ def test_db(tmp_path) -> GhostDriveDB:
         path=tmp_path / "test.db",
         ledger_key=bytes(range(32)),
         genesis_seed=bytes(range(32, 64)),
+        master_key=b"\x00" * 32,
     )
     db.open()
     return db
@@ -67,6 +64,22 @@ async def test_verify_chunk_location_success(test_db, keystore_mgr) -> None:
         "nonce_counter": 1
     }
 
+    # Populate DB with needed records so the database query returns successfully
+    with test_db.transaction():
+        test_db._conn.execute(
+            "INSERT INTO backends (id, type, credentials_ref, status, priority) VALUES ('tg-id', 'telegram', 'ref', 'healthy', 1)"
+        )
+        test_db._conn.execute(
+            """INSERT INTO files (id, name, path, size, mime_type, tier, created_at, modified_at, tombstone)
+               VALUES ('file-1', 'doc.txt', '/files/doc.txt', 100, 'text/plain', 'IMPORTANT', '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z', 0)"""
+        )
+        test_db._conn.execute(
+            "INSERT INTO chunks (id, file_id, chunk_index, total_chunks, blake3_hash, size, nonce_counter, sub_block_count, ref_count) VALUES ('chunk-1', 'file-1', 0, 1, 'hash', 32, 1, 1, 1)"
+        )
+        test_db._conn.execute(
+            "INSERT INTO chunk_locations (chunk_id, sub_block_index, backend_id, reference_id, url_type, upload_date, status) VALUES ('chunk-1', 0, 'tg-id', 'ref-1', 'permanent', '2026-06-12', 'confirmed')"
+        )
+
     # Patch ChunkDecryptor to return success
     with patch("ghostdrive.pipeline.healing.ChunkDecryptor") as mock_decrypt_cls:
         mock_decrypt = MagicMock()
@@ -97,6 +110,22 @@ async def test_verify_chunk_location_auth_failed(test_db, keystore_mgr) -> None:
         "reference_id": "ref-1",
         "nonce_counter": 1
     }
+
+    # Populate DB with needed records
+    with test_db.transaction():
+        test_db._conn.execute(
+            "INSERT INTO backends (id, type, credentials_ref, status, priority) VALUES ('tg-id', 'telegram', 'ref', 'healthy', 1)"
+        )
+        test_db._conn.execute(
+            """INSERT INTO files (id, name, path, size, mime_type, tier, created_at, modified_at, tombstone)
+               VALUES ('file-1', 'doc.txt', '/files/doc.txt', 100, 'text/plain', 'IMPORTANT', '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z', 0)"""
+        )
+        test_db._conn.execute(
+            "INSERT INTO chunks (id, file_id, chunk_index, total_chunks, blake3_hash, size, nonce_counter, sub_block_count, ref_count) VALUES ('chunk-1', 'file-1', 0, 1, 'hash', 32, 1, 1, 1)"
+        )
+        test_db._conn.execute(
+            "INSERT INTO chunk_locations (chunk_id, sub_block_index, backend_id, reference_id, url_type, upload_date, status) VALUES ('chunk-1', 0, 'tg-id', 'ref-1', 'permanent', '2026-06-12', 'confirmed')"
+        )
 
     # Patch ChunkDecryptor to raise AuthenticationError
     with patch("ghostdrive.pipeline.healing.ChunkDecryptor") as mock_decrypt_cls:
@@ -250,3 +279,92 @@ async def test_healing_queue_pauses_on_foreground_upload(qapp, test_db, keystore
         queue.stop()
         
         mock_heal_step.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_healing_queue_replicates_all_sub_blocks(qapp, test_db, keystore_mgr) -> None:
+    # 1. Set up two backends: one has chunk (source), one does not (target)
+    with test_db.transaction():
+        test_db._conn.execute(
+            """INSERT INTO backends (id, type, credentials_ref, status, priority, quota_used, quota_limit)
+               VALUES ('tg-id-multi', 'telegram', 'ref1', 'healthy', 100, 0, 1000)"""
+        )
+        test_db._conn.execute(
+            """INSERT INTO backends (id, type, credentials_ref, status, priority, quota_used, quota_limit)
+               VALUES ('dc-id-multi', 'discord', 'ref2', 'healthy', 50, 0, 1000)"""
+        )
+        test_db._conn.execute(
+            """INSERT INTO files (id, name, path, size, mime_type, tier, created_at, modified_at, tombstone)
+               VALUES ('file-multi', 'video.mp4', '/files/video.mp4', 100, 'video/mp4', 'CRITICAL', '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z', 0)"""
+        )
+        test_db._conn.execute(
+            """INSERT INTO chunks (id, file_id, chunk_index, total_chunks, blake3_hash, size, nonce_counter, sub_block_count, ref_count)
+               VALUES ('chunk-multi', 'file-multi', 0, 1, 'hash-multi', 100, 1, 2, 1)"""
+        )
+        # Replicated to Telegram with 2 sub-blocks
+        test_db._conn.execute(
+            """INSERT INTO chunk_locations (chunk_id, sub_block_index, backend_id, reference_id, url_type, upload_date, status)
+               VALUES ('chunk-multi', 0, 'tg-id-multi', 'ref-tg-0', 'permanent', '2026-06-12T00:00:00Z', 'confirmed')"""
+        )
+        test_db._conn.execute(
+            """INSERT INTO chunk_locations (chunk_id, sub_block_index, backend_id, reference_id, url_type, upload_date, status)
+               VALUES ('chunk-multi', 1, 'tg-id-multi', 'ref-tg-1', 'permanent', '2026-06-12T00:00:00Z', 'confirmed')"""
+        )
+
+    mock_tg = MagicMock()
+    mock_tg.id = "tg-id-multi"
+    mock_tg.type = "telegram"
+    mock_tg.connect = AsyncMock()
+    
+    async def download_gen(ref_id):
+        if ref_id == "ref-tg-0":
+            yield b"\x00" * 32
+        elif ref_id == "ref-tg-1":
+            yield b"\x11" * 32
+            
+    mock_tg.download = MagicMock(side_effect=download_gen)
+
+    mock_dc = AsyncMock()
+    mock_dc.id = "dc-id-multi"
+    mock_dc.type = "discord"
+    mock_dc.upload.side_effect = lambda stream, chunk_id, sub_block_index: f"ref-dc-healed-{sub_block_index}"
+
+    active_backends = {
+        "telegram": mock_tg,
+        "discord": mock_dc
+    }
+
+    mock_main_view = MagicMock()
+    mock_main_view.active_uploads = 0
+
+    queue = HealingQueue(
+        db=test_db,
+        active_backends=active_backends,
+        km=keystore_mgr,
+        main_view=mock_main_view
+    )
+
+    with patch("ghostdrive.pipeline.healing.ChunkDecryptor") as mock_decrypt_cls:
+        mock_decrypt = MagicMock()
+        mock_decrypt.verify_and_decrypt_streaming.return_value = [b"plain"]
+        mock_decrypt_cls.return_value = mock_decrypt
+
+        await queue.perform_healing_step()
+
+        # Check target backend received uploads for both sub-blocks
+        assert mock_dc.upload.call_count == 2
+        
+        # Verify that both chunk locations are now confirmed on discord
+        with test_db.transaction():
+            locs = test_db._conn.execute(
+                "SELECT * FROM chunk_locations WHERE chunk_id = 'chunk-multi' AND backend_id = 'dc-id-multi' ORDER BY sub_block_index ASC"
+            ).fetchall()
+            
+        assert len(locs) == 2
+        assert locs[0]["sub_block_index"] == 0
+        assert locs[0]["status"] == "confirmed"
+        assert locs[0]["reference_id"] == "ref-dc-healed-0"
+        
+        assert locs[1]["sub_block_index"] == 1
+        assert locs[1]["status"] == "confirmed"
+        assert locs[1]["reference_id"] == "ref-dc-healed-1"

@@ -2,9 +2,9 @@
 dialogs.py -- Dialog components for the GhostDrive GUI (About, Conflict, Inspector).
 """
 
-from PyQt6.QtCore import Qt
+import logging
+
 from PyQt6.QtWidgets import (
-    QDialog,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
@@ -12,9 +12,12 @@ from PyQt6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QWidget,
+    QLineEdit,
 )
 from ghostdrive.gui.widgets import StyledButton, GlassCard
 from ghostdrive.gui.styles import ResilientDialog
+
+logger = logging.getLogger(__name__)
 
 class AboutDialog(ResilientDialog):
     """Presents application version, licensing, and keyboard shortcut list."""
@@ -163,7 +166,7 @@ class FileInspectorDialog(ResilientDialog):
                         (file_row["id"],)
                     ).fetchall()
             except Exception as exc:
-                print(f"[Inspector Error] Failed to fetch chunk locations: {exc}")
+                logger.warning("Inspector: failed to fetch chunk locations: %s", exc)
         
         loc_lines = []
         for loc in locations:
@@ -207,3 +210,200 @@ class FileInspectorDialog(ResilientDialog):
         close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(close_btn)
         layout.addLayout(btn_layout)
+
+
+class SecureEraseDialog(ResilientDialog):
+    """
+    Confirm dialog for L1/L2 secure deletions or backend removal.
+    Enforces a text match confirmation and a forced countdown.
+    """
+    def __init__(self, target_label: str, countdown_secs: int = 5, parent=None) -> None:
+        super().__init__(parent, base_width=440, base_height=280)
+        self.setWindowTitle("Confirm Destructive Operation")
+        self.setModal(True)
+        self.target_label = target_label
+        self.counter = countdown_secs
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("⚠️ HIGH-TIER DESTRUCTIVE OPERATION", self)
+        title.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 14px;")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            f"You are about to securely wipe or remove <b>{target_label}</b>.<br>"
+            "This operation will overwrite data blocks using randomized patterns. "
+            "It cannot be undone or recovered.", self
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #d1d5db; font-size: 12px;")
+        layout.addWidget(desc)
+
+        # Typing confirmation
+        prompt_lbl = QLabel(f"Type the exact label '<b>{target_label}</b>' to confirm:", self)
+        prompt_lbl.setStyleSheet("color: #f59e0b; font-size: 11px;")
+        layout.addWidget(prompt_lbl)
+
+        self.text_input = QLineEdit(self)
+        self.text_input.setPlaceholderText("Type label here...")
+        self.text_input.textChanged.connect(self.validate_inputs)
+        layout.addWidget(self.text_input)
+
+        # Buttons
+        self.btn_layout = QHBoxLayout()
+        self.btn_layout.addStretch()
+        
+        self.cancel_btn = StyledButton("Cancel", self, secondary=True)
+        self.cancel_btn.clicked.connect(self.reject)
+        self.btn_layout.addWidget(self.cancel_btn)
+
+        self.ok_btn = StyledButton(f"Wipe Data ({self.counter}s)", self, danger=True)
+        self.ok_btn.setEnabled(False)
+        self.ok_btn.clicked.connect(self.accept)
+        self.btn_layout.addWidget(self.ok_btn)
+        layout.addLayout(self.btn_layout)
+
+        # Timer for countdown
+        from PyQt6.QtCore import QTimer
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self.update_countdown)
+        self.timer.start()
+
+    def update_countdown(self) -> None:
+        if self.counter > 1:
+            self.counter -= 1
+            self.ok_btn.setText(f"Wipe Data ({self.counter}s)")
+        else:
+            self.timer.stop()
+            self.counter = 0
+            self.ok_btn.setText("Wipe Data")
+            self.validate_inputs()
+
+    def validate_inputs(self) -> None:
+        text_matches = (self.text_input.text() == self.target_label)
+        timer_finished = (self.counter == 0)
+        self.ok_btn.setEnabled(text_matches and timer_finished)
+
+    def accept(self) -> None:
+        self.timer.stop()
+        super().accept()
+
+    def reject(self) -> None:
+        self.timer.stop()
+        super().reject()
+
+
+class DriveNotFoundDialog(ResilientDialog):
+    """Presented when a registered drive backend is not physically connected."""
+    def __init__(self, drive_label: str, uuid: str, parent=None) -> None:
+        super().__init__(parent, base_width=420, base_height=220)
+        self.setWindowTitle("Drive Not Connected")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("🔌 Registered Drive Unreachable", self)
+        title.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 14px;")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            f"The registered drive <b>{drive_label}</b> is not connected to this machine.<br><br>"
+            f"<b>Filesystem UUID:</b> <code style='color: #8b5cf6;'>{uuid}</code><br><br>"
+            "Please plug the drive back in and scan again to resume read/write operations.", self
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #d1d5db; font-size: 12px;")
+        layout.addWidget(desc)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        close_btn = StyledButton("Close Dialog", self, secondary=True)
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+
+class DriveManufacturerReferralDialog(ResilientDialog):
+    """
+    Safety referral modal that blocks whole-drive sector formats, directing users
+    to official drive manufacturer software.
+    """
+    def __init__(self, drive_label: str, drive_type: str, parent=None) -> None:
+        super().__init__(parent, base_width=440, base_height=260)
+        self.setWindowTitle("Whole-Drive Format Blocked")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("🛡️ Safety Override: Drive-Level Format Blocked", self)
+        title.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 14px;")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            f"GhostDrive has blocked your request to format/erase the drive <b>{drive_label}</b>.<br><br>"
+            "To prevent accidental sector wipes of primary boot partitions, GhostDrive does not "
+            "execute raw drive-level formatting. Please use the manufacturer utilities:<br>"
+            "• <b>Samsung</b>: Samsung Magician Utility<br>"
+            "• <b>Crucial</b>: Crucial Storage Executive<br>"
+            "• <b>OS Tools</b>: Disk Management (Windows) or Disk Utility (macOS)", self
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #d1d5db; font-size: 12px;")
+        layout.addWidget(desc)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        close_btn = StyledButton("I Understand", self, secondary=True)
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+
+class SmartWarningDialog(ResilientDialog):
+    """Warning modal when a drive reports critical hardware degradation."""
+    def __init__(self, drive_label: str, assessment: str, parent=None) -> None:
+        super().__init__(parent, base_width=440, base_height=240)
+        self.setWindowTitle("Hardware Failure Warning")
+        self.setModal(True)
+        self.run_healing = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("🚨 CRITICAL HARDWARE STATUS DETECTED", self)
+        title.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 14px;")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            f"The drive <b>{drive_label}</b> has reported a failing S.M.A.R.T. health status!<br>"
+            f"<b>Assessment:</b> <span style='color: #ef4444; font-weight: bold;'>{assessment.upper()}</span><br><br>"
+            "It is highly recommended to immediately trigger Pre-emptive Healing to duplicate "
+            "all chunks from this drive to other healthy backup channels.", self
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #d1d5db; font-size: 12px;")
+        layout.addWidget(desc)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        cancel_btn = StyledButton("Ignore", self, secondary=True)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        self.heal_btn = StyledButton("Run Pre-emptive Healing", self, danger=True)
+        self.heal_btn.clicked.connect(self.on_heal_clicked)
+        btn_layout.addWidget(self.heal_btn)
+        layout.addLayout(btn_layout)
+
+    def on_heal_clicked(self) -> None:
+        self.run_healing = True
+        self.accept()

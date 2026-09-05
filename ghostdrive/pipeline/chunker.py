@@ -1,26 +1,5 @@
 """
-chunker.py -- File-to-logical-chunk splitter (spec §5.1, §5.4, §5.9).
-
-Pipeline position
------------------
-    OS file lock acquired
-    -> BLAKE3+size dedup check (pre-compression, on original)  <- dedup.py
-    -> THIS MODULE: split file into logical chunks
-    -> compressor.py, chunk_crypto.py, upload.py
-
-What this does
---------------
-Splits a file into logical chunks based on the backend's logical_chunk_bytes.
-Yields (chunk_index, offset, size) descriptors -- NO data read here.
-Data is read lazily during the encrypt+compress pipeline.
-
-Edge cases (spec §5.9)
------------------------
-- Empty files: yields a single zero-size descriptor (zero-sub-block manifest entry).
-- Symlinks: followed with depth limit (max 10) to prevent infinite loops.
-- Unicode filenames: all paths handled via pathlib (explicit UTF-8 throughout).
-- File modified during upload: OS lock prevents modification. If lock is
-  unavailable and size changes post-upload, caller warns and re-uploads.
+chunker.py -- File-to-logical-chunk splitter.
 """
 
 from __future__ import annotations
@@ -29,7 +8,7 @@ import dataclasses
 import logging
 import os
 from pathlib import Path
-from typing import AsyncGenerator, Generator, Optional
+from typing import AsyncGenerator, Generator
 
 logger = logging.getLogger(__name__)
 
@@ -73,26 +52,31 @@ def resolve_path(path: Path, max_depth: int = _SYMLINK_MAX_DEPTH) -> Path:
         RuntimeError: Symlink depth exceeded (loop detected).
         FileNotFoundError: Path does not exist after resolution.
     """
-    # Walk the chain manually to enforce the depth limit.
-    # Path.resolve() does not expose the depth -- we check it separately.
-    current = Path(path)
+    # Step one symlink level at a time using os.readlink() so the depth limit
+    # is actually enforced. Path.resolve() calls the OS realpath(2) which
+    # follows the *entire* chain in one shot and would bypass our limit.
+    #
+    # We use os.path.normpath (not Path.resolve) for intermediate steps to
+    # avoid the //?/ extended-path UNC prefix that Path.resolve() can produce
+    # on Windows for paths in certain directories (e.g., %TEMP%).
+    current = os.path.abspath(str(path))
     for _ in range(max_depth):
-        if not current.is_symlink():
+        if not os.path.islink(current):
             break
-        # Resolve one symlink step (handles relative and absolute targets)
-        target = current.resolve()  # OS resolves one level
-        if target == current:       # No progress (shouldn't happen, but guard)
-            break
-        current = target
+        # Read exactly ONE symlink level
+        link_target = os.readlink(current)
+        if not os.path.isabs(link_target):
+            # Relative symlink — resolve relative to the symlink's parent dir
+            link_target = os.path.join(os.path.dirname(current), link_target)
+        # Normalise (.., . etc) without following further symlinks
+        current = os.path.normpath(link_target)
     else:
         raise RuntimeError(
             f"Symlink depth exceeded {max_depth} levels for path: {path}. "
             "Possible symlink loop -- upload aborted."
         )
 
-    # Final resolution to normalise Windows extended paths (//?/ prefix)
-    resolved = current.resolve()
-
+    resolved = Path(current)
     if not resolved.exists():
         raise FileNotFoundError(f"Path does not exist after symlink resolution: {resolved}")
 
@@ -112,7 +96,7 @@ def split_file(
     Args:
         path:               Path to the file. Symlinks are resolved (depth <= 10).
         logical_chunk_bytes: Backend-specific logical chunk size in bytes.
-                            e.g. 1.5 GB for Telegram, 1.9 GB for GitHub.
+                            e.g. 1.5 GB for Telegram, 2 GB for Discord.
 
     Yields:
         ChunkDescriptor for each logical chunk.

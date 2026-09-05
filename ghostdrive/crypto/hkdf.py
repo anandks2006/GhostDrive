@@ -1,21 +1,5 @@
 """
 hkdf.py — HKDF-SHA512 subkey derivation with fixed info strings.
-
-Spec §4.2 — HKDF Info Strings (Key Purpose Binding)
-=====================================================
-Without distinct info strings, subkeys derived from the same Master Key are
-indistinguishable. The info strings below are FIXED CONSTANTS in the codebase.
-
-DO NOT change them without a full migration plan — changing any info string
-silently produces a different subkey for every installation, making all
-existing encrypted data unreadable.
-
-Key derivation path:
-    Master Key (32 bytes, from BIP39 entropy)
-    + HKDF salt (32 bytes, random, generated at first run, stored in keystore.json)
-    + info string (purpose-binding constant)
-    ──────────────────────────────────────────
-    → derived subkey (length as required per consumer)
 """
 
 from cryptography.hazmat.primitives import hashes
@@ -27,12 +11,18 @@ from ghostdrive.exceptions import CryptoError
 # These are the ONLY valid info strings for GhostDrive subkey derivation.
 # Defined in Spec §4.2.
 
-INFO_CHUNK_ENCRYPTION  = b"ghostdrive-v1-chunk-encryption"    # ChaCha20-Poly1305 chunk key
-INFO_INDEX_MAC         = b"ghostdrive-v1-index-mac"           # HMAC-SHA512 SQLite ledger chain key
-INFO_KEYSTORE_ENC      = b"ghostdrive-v1-keystore-enc"        # AES-256-GCM keystore.json encryption
-INFO_SHARE_KEY         = b"ghostdrive-v1-share-key"           # Share package encryption (Phase 2)
-INFO_INDEX_BACKUP_NAME = b"ghostdrive-v1-index-backup-name"   # Deterministic index backup filename
-INFO_CLI_SESSION       = b"ghostdrive-v1-cli-session"         # CLI companion session-derived key
+INFO_CHUNK_ENCRYPTION  = b"sloth-chunk-enc-v1"    # ChaCha20-Poly1305 chunk key
+INFO_INDEX_MAC         = b"sloth-hmac-v1"           # HMAC-SHA512 SQLite ledger chain key
+INFO_KEYSTORE_ENC      = b"sloth-keystore-enc-v1"        # AES-256-GCM keystore.json encryption
+INFO_SHARE_KEY         = b"sloth-share-key-v1"           # Share package encryption (Phase 2)
+INFO_INDEX_BACKUP_NAME = b"sloth-index-backup-name-v1"   # Deterministic index backup filename
+INFO_SECRETS_KEY            = b"sloth-secrets-v1"                    # Secrets vault encryption key
+INFO_BACKEND_CREDENTIALS   = b"ghostdrive-v1-backend-credentials"  # 3rd-party backend credential encryption
+INFO_INDEX_BACKUP_ENC      = b"sloth-db-snapshot-v1"     # AES-256-GCM database backup encryption
+INFO_CREDENTIALS_BACKUP_NAME = b"ghostdrive-v1-credentials-backup-name" # Deterministic credentials backup filename
+INFO_P2P_IDENTITY           = b"ghostdrive-v1-p2p-identity"  # Ed25519 P2P / Tor sharing identity key
+INFO_MLKEM_PRIVKEY          = b"ghostdrive-v1-mlkem-privkey"  # ML-KEM-768 private key encryption key
+
 
 
 def derive_subkey(
@@ -45,10 +35,9 @@ def derive_subkey(
     Derive a subkey from the Master Key using HKDF-SHA512.
 
     Args:
-        master_key: 256-bit (32-byte) Master Key from BIP39 entropy.
+        master_key: 256-bit (32-byte) Master Key.
         salt:       Fixed 32-byte random HKDF salt from keystore.json.
-                    Generated once at first run; MUST be shared with the
-                    Kaggle CLI for consistent subkey derivation across devices.
+                    Generated once at first run.
         info:       Purpose-binding info string. Use one of the INFO_* constants
                     defined in this module. Never pass an ad-hoc string here.
         length:     Output key length in bytes (default 32).
@@ -59,9 +48,9 @@ def derive_subkey(
     Raises:
         CryptoError: If inputs fail validation.
     """
-    if not isinstance(master_key, bytes) or len(master_key) != 32:
+    if not isinstance(master_key, (bytes, bytearray, memoryview)) or len(master_key) != 32:
         raise CryptoError(
-            f"master_key must be exactly 32 bytes (256-bit); got {len(master_key) if isinstance(master_key, bytes) else type(master_key).__name__}"
+            f"master_key must be exactly 32 bytes (256-bit); got {len(master_key) if isinstance(master_key, (bytes, bytearray, memoryview)) else type(master_key).__name__}"
         )
     if not isinstance(salt, bytes) or len(salt) != 32:
         raise CryptoError(
@@ -128,32 +117,48 @@ def derive_index_backup_name(master_key: bytes, salt: bytes) -> bytes:
     return derive_subkey(master_key, salt, INFO_INDEX_BACKUP_NAME, length=32)
 
 
-def derive_cli_session_key(
-    master_key: bytes,
-    hkdf_salt: bytes,
-    session_salt: bytes,
-) -> bytes:
+def derive_secrets_key(master_key: bytes, salt: bytes) -> bytes:
     """
-    Derive a scoped, time-limited CLI session key (32 bytes).
-
-    The session key is derived with a combined salt:
-        combined_salt = HKDF_salt XOR session_salt
-
-    This ensures the session key is unique per session while remaining
-    reproducible from the Master Key + both salts. If the session key is
-    compromised, only data uploaded during that session window is at risk.
-
-    Args:
-        master_key:   32-byte Master Key.
-        hkdf_salt:    Fixed 32-byte HKDF salt from keystore.json.
-        session_salt: Fresh 32-byte random salt generated at session setup.
-                      Stored in the Colab/Kaggle environment secret store.
-
-    Returns:
-        32-byte CLI session key.
+    Derive the AES-256-GCM secrets vault encryption key (32 bytes).
+    Used to encrypt password and note blobs in secrets_vault.
     """
-    if not isinstance(session_salt, bytes) or len(session_salt) != 32:
-        raise CryptoError(f"session_salt must be exactly 32 bytes; got {len(session_salt) if isinstance(session_salt, bytes) else type(session_salt).__name__}")
+    return derive_subkey(master_key, salt, INFO_SECRETS_KEY, length=32)
 
-    combined_salt = bytes(a ^ b for a, b in zip(hkdf_salt, session_salt))
-    return derive_subkey(master_key, combined_salt, INFO_CLI_SESSION, length=32)
+
+def derive_backend_credentials_key(master_key: bytes, salt: bytes) -> bytes:
+    """
+    Derive the AES-256-GCM backend credentials encryption key (32 bytes).
+    Used to encrypt 3rd-party backend credentials (Discord, Telegram) before
+    they are stored in the OS Keyring. This provides a second layer of
+    protection: OS Keyring access control + AES-256-GCM tied to the master key.
+    Cryptographically isolated from all other subkeys via a unique info string.
+    """
+    return derive_subkey(master_key, salt, INFO_BACKEND_CREDENTIALS, length=32)
+
+
+def derive_index_backup_enc_key(master_key: bytes, salt: bytes) -> bytes:
+    """
+    Derive the AES-256-GCM database index backup encryption key (32 bytes).
+    Cryptographically isolated from all other subkeys via a unique info string.
+    """
+    return derive_subkey(master_key, salt, INFO_INDEX_BACKUP_ENC, length=32)
+
+
+def derive_credentials_backup_name(master_key: bytes, salt: bytes) -> bytes:
+    """
+    Derive the deterministic credentials bundle backup filename seed (32 bytes).
+    """
+    return derive_subkey(master_key, salt, INFO_CREDENTIALS_BACKUP_NAME, length=32)
+
+
+def derive_p2p_identity_key(master_key: bytes, salt: bytes) -> bytes:
+    """
+    Derive the Ed25519 P2P identity key seed (32 bytes).
+
+    Used in sharing.py to generate the per-device Ed25519 signing key that
+    authenticates outbound P2P/Tor connections.  Cryptographically isolated
+    from all other subkeys via a dedicated info string so a compromise of this
+    key reveals nothing about the chunk encryption key or HMAC ledger key.
+    """
+    return derive_subkey(master_key, salt, INFO_P2P_IDENTITY, length=32)
+

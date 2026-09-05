@@ -2,6 +2,8 @@
 telemetry_view.py -- Dashboard for real-time speed charting and storage quota allocation.
 """
 
+import logging
+
 from PyQt6.QtCore import Qt, QTimer, QPointF
 from PyQt6.QtGui import QPainter, QPen, QColor, QLinearGradient
 from PyQt6.QtWidgets import (
@@ -12,7 +14,8 @@ from PyQt6.QtWidgets import (
     QProgressBar,
 )
 from ghostdrive.gui.widgets import GlassCard
-import random
+
+logger = logging.getLogger(__name__)
 
 class SpeedChartWidget(QWidget):
     """
@@ -112,8 +115,8 @@ class TelemetryView(QWidget):
         self._db = db
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(20)
 
         # Title
         title_lbl = QLabel("Telemetry & System Health", self)
@@ -135,15 +138,31 @@ class TelemetryView(QWidget):
 
         # Bottom section: Storage + Health
         bottom_layout = QHBoxLayout()
-        bottom_layout.setSpacing(16)
+        bottom_layout.setSpacing(20)
 
         # Storage quotas card
         self.storage_card = GlassCard(self)
         self.storage_layout = QVBoxLayout(self.storage_card)
         self.storage_layout.setContentsMargins(16, 16, 16, 16)
+        self.storage_layout.setSpacing(12)
         storage_title = QLabel("Active Backend Storage Quotas", self.storage_card)
         storage_title.setObjectName("SubHeading")
         self.storage_layout.addWidget(storage_title)
+        
+        # Container for backends list (with stretch at bottom)
+        self.backends_container = QWidget(self.storage_card)
+        self.backends_container.setStyleSheet("background: transparent;")
+        self.backends_layout = QVBoxLayout(self.backends_container)
+        self.backends_layout.setContentsMargins(0, 0, 0, 0)
+        self.backends_layout.setSpacing(8)
+        self.backends_layout.addStretch(1) # Stretch at the bottom to push items up
+        self.storage_layout.addWidget(self.backends_container)
+        
+        self.placeholder_lbl = QLabel("No active storage channels linked.\nConfigure a local or cloud backend in the Backends tab to begin replicating chunks.", self.storage_card)
+        self.placeholder_lbl.setStyleSheet("color: #9ca3af; font-size: 12px; font-weight: 500;")
+        self.placeholder_lbl.setWordWrap(True)
+        self.placeholder_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.storage_layout.addWidget(self.placeholder_lbl)
         
         self.backend_widgets = {}  # type: dict[str, tuple[QLabel, QProgressBar]]
         bottom_layout.addWidget(self.storage_card, stretch=3)
@@ -152,6 +171,7 @@ class TelemetryView(QWidget):
         self.health_card = GlassCard(self)
         health_layout = QVBoxLayout(self.health_card)
         health_layout.setContentsMargins(16, 16, 16, 16)
+        health_layout.setSpacing(12)
         health_title = QLabel("System Status Indicators", self.health_card)
         health_title.setObjectName("SubHeading")
         health_layout.addWidget(health_title)
@@ -177,6 +197,9 @@ class TelemetryView(QWidget):
         self.alert_box.setWordWrap(True)
         self.alert_box.setObjectName("MutedLabel")
         health_layout.addWidget(self.alert_box)
+
+        # Push the button to the very bottom as a footer button
+        health_layout.addStretch(1)
 
         # Manual Verify button
         from ghostdrive.gui.widgets import StyledButton
@@ -243,7 +266,9 @@ class TelemetryView(QWidget):
         self.chart.add_speed_point(speed)
 
         # 2. Update storage allocations
-        if not self._db:
+        if not self._db or not getattr(self._db, "_conn", None):
+            self.placeholder_lbl.setVisible(True)
+            self.backends_container.setVisible(False)
             return
 
         try:
@@ -253,41 +278,62 @@ class TelemetryView(QWidget):
                     "SELECT id, type, quota_used, quota_limit, quota_reserved, status FROM backends"
                 ).fetchall()
 
-            for row in backends:
-                b_id = row["id"]
-                b_type = row["type"]
-                used = row["quota_used"]
-                limit = row["quota_limit"]
-                reserved = row["quota_reserved"]
-                status = row["status"]
+            if not backends:
+                self.placeholder_lbl.setVisible(True)
+                self.backends_container.setVisible(False)
+                for lbl, bar in self.backend_widgets.values():
+                    lbl.setVisible(False)
+                    bar.setVisible(False)
+            else:
+                self.placeholder_lbl.setVisible(False)
+                self.backends_container.setVisible(True)
+                
+                # Hide/remove widgets for backends that are no longer present
+                active_ids = {row["id"] for row in backends}
+                for b_id, (lbl, bar) in list(self.backend_widgets.items()):
+                    if b_id not in active_ids:
+                        lbl.deleteLater()
+                        bar.deleteLater()
+                        del self.backend_widgets[b_id]
 
-                total_allocated = used + reserved
-                # Format sizes nicely
-                used_str = self._format_bytes(total_allocated)
-                limit_str = self._format_bytes(limit) if limit < 4000000000000000000 else "Unlimited"
+                for row in backends:
+                    b_id = row["id"]
+                    b_type = row["type"]
+                    used = row["quota_used"]
+                    limit = row["quota_limit"]
+                    reserved = row["quota_reserved"]
+                    status = row["status"]
 
-                pct = 0
-                if limit > 0 and limit < 4000000000000000000:
-                    pct = int((total_allocated * 100) / limit)
+                    total_allocated = used + reserved
+                    used_str = self._format_bytes(total_allocated)
+                    limit_str = self._format_bytes(limit) if limit < 4000000000000000000 else "Unlimited"
 
-                label_text = f"{b_type.upper()} ({status}): {used_str} / {limit_str}"
+                    pct = 0
+                    if limit > 0 and limit < 4000000000000000000:
+                        pct = int((total_allocated * 100) / limit)
 
-                if b_id not in self.backend_widgets:
-                    lbl = QLabel(label_text, self.storage_card)
-                    bar = QProgressBar(self.storage_card)
-                    bar.setMaximum(100)
-                    bar.setValue(pct)
-                    self.storage_layout.addWidget(lbl)
-                    self.storage_layout.addWidget(bar)
-                    self.backend_widgets[b_id] = (lbl, bar)
-                else:
-                    lbl, bar = self.backend_widgets[b_id]
-                    lbl.setText(label_text)
-                    bar.setValue(pct)
+                    label_text = f"{b_type.upper()} ({status}): {used_str} / {limit_str}"
+
+                    if b_id not in self.backend_widgets:
+                        lbl = QLabel(label_text, self.backends_container)
+                        bar = QProgressBar(self.backends_container)
+                        bar.setMaximum(100)
+                        bar.setValue(pct)
+                        # Insert before the stretch (which is at the last index, i.e. count() - 1)
+                        insert_idx = self.backends_layout.count() - 1
+                        self.backends_layout.insertWidget(insert_idx, lbl)
+                        self.backends_layout.insertWidget(insert_idx + 1, bar)
+                        self.backend_widgets[b_id] = (lbl, bar)
+                    else:
+                        lbl, bar = self.backend_widgets[b_id]
+                        lbl.setVisible(True)
+                        lbl.setText(label_text)
+                        bar.setVisible(True)
+                        bar.setValue(pct)
 
         except Exception as exc:
             # Gracefully ignore if database is temporarily locked or not initialised
-            print(f"[Telemetry Update Error] {exc}")
+            logger.warning("Telemetry update error: %s", exc)
 
     def _format_bytes(self, num_bytes: int) -> str:
         for unit in ["B", "KB", "MB", "GB", "TB"]:

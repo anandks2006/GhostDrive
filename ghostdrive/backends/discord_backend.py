@@ -1,42 +1,5 @@
 """
 discord_backend.py -- GhostDrive Discord Backend Plugin.
-
-Spec §6.2 -- Discord
-=====================
-Tier:              IMPORTANT
-Free tier:         Unlimited storage (10 MB attachment limit)
-Logical chunk:     8 MB
-Sub-block:         8 MB (headroom under 10 MB Discord limit)
-is_ephemeral_url:  True -- CDN URLs expire; message_id + channel_id stored
-Capability flags:  NOT cold_storage, NOT ml_artifacts_only, NOT cpu_intensive
-ToS risk:          Experimental label (spec §6.2 note)
-
-Discord-specific constraints (June 2025)
------------------------------------------
-- Max attachment per message: 10 MB (10,485,760 bytes hard limit)
-- Operational chunk size: 8 MB (provides headroom for multipart upload overhead under 10 MB free limit)
-- Sub-block = 1 Discord message with 1 attachment (8 MB)
-- CDN URLs expire after ~24 h when accessed outside Discord
-- Bot rate limit: ~5 messages / 5 s on free bots -> inter-upload delay
-
-Ephemeral URL pattern (spec §6.1 -- is_ephemeral_url=True)
-------------------------------------------------------------
-- reference_id stores: "{message_id}:{channel_id}" (colon-separated string)
-- On download: fetch fresh CDN URL via Discord API (message_id + channel_id)
-- NEVER cache the raw CDN URL -- it expires
-
-Rate limit handling (spec §6.2)
----------------------------------
-- 429 HTTPException from discord.py -> wait Retry-After header + jitter
-- Max retries: _RATE_LIMIT_MAX_RETRIES (5) before BackendRateLimitError
-- 413 Payload Too Large -> reduce sub-block size, raise BackendConnectionError
-
-Session storage (spec §4.5)
-----------------------------
-- Bot token stored in OS keyring (DPAPI/libsecret/Keychain)
-  service="ghostdrive", account="discord_bot_token"
-- Channel ID stored in OS keyring: account="discord_channel_id"
-- ghostdrive.db backends table: credentials_ref only, never the token
 """
 
 from __future__ import annotations
@@ -47,21 +10,6 @@ import logging
 import time
 from typing import AsyncGenerator, Optional
 
-logger = logging.getLogger(__name__)
-
-try:
-    import discord
-    import aiohttp
-    _DISCORD_AVAILABLE = True
-except ImportError:
-    _DISCORD_AVAILABLE = False
-
-try:
-    import keyring as _keyring
-    _KEYRING_AVAILABLE = True
-except ImportError:
-    _KEYRING_AVAILABLE = False
-
 from ghostdrive.backends.base import BackendBase, HealthResult
 from ghostdrive.exceptions import (
     BackendAuthError,
@@ -70,28 +18,30 @@ from ghostdrive.exceptions import (
     BackendRateLimitError,
 )
 
-# ── Constants (spec §5.4, §6.2) ───────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
-# Discord hard limit: 10,485,760 bytes. Operational: 8 MB (headroom for overhead)
-DISCORD_HARD_LIMIT_BYTES  = 10 * 1024 * 1024     # 10 MB absolute ceiling
-OPERATIONAL_SUB_BLOCK_BYTES = 8 * 1024 * 1024    # 8 MB -- safe operational limit
+try:
+    import discord  # type: ignore
+    import aiohttp  # type: ignore
+    _DISCORD_AVAILABLE = True
+except ImportError:
+    _DISCORD_AVAILABLE = False
 
-# Spec: logical chunk = 8 MB, sub-block = 8 MB (operates under the 10 MB Discord free tier limit, with 8 MB sub-blocks providing headroom for multipart upload overhead)
-# Each sub-block is one Discord attachment (max OPERATIONAL_SUB_BLOCK_BYTES)
-LOGICAL_CHUNK_BYTES = 24 * 1024 * 1024            # 24 MB
-SUB_BLOCK_BYTES     = OPERATIONAL_SUB_BLOCK_BYTES  # 8 MB per attachment
 
-# Rate limit
+DISCORD_HARD_LIMIT_BYTES  = 10 * 1024 * 1024
+OPERATIONAL_SUB_BLOCK_BYTES = 8 * 1024 * 1024
+
+LOGICAL_CHUNK_BYTES = 24 * 1024 * 1024
+SUB_BLOCK_BYTES     = OPERATIONAL_SUB_BLOCK_BYTES
+
 _RATE_LIMIT_MAX_RETRIES = 5
 _RATE_LIMIT_JITTER_S    = 0.5
-_INTER_UPLOAD_DELAY_S   = 1.2    # conservative inter-attachment delay
+_INTER_UPLOAD_DELAY_S   = 1.2
 
-# OS keyring keys (spec §4.5)
 _KEYRING_SERVICE       = "ghostdrive"
 _KEYRING_ACCOUNT_TOKEN = "discord_bot_token"
 _KEYRING_ACCOUNT_CHAN  = "discord_channel_id"
 
-# reference_id format: "{message_id}:{channel_id}"
 _REF_SEP = ":"
 
 
@@ -154,12 +104,13 @@ class DiscordBackend(BackendBase):
         self,
         channel_id: Optional[int] = None,
         bot_token: Optional[str]  = None,
+        _skip_keyring: bool = False,
     ) -> None:
         """
         Args:
-            channel_id: Discord channel ID for uploads. Loaded from OS keyring
-                        if not provided (after first store_credentials() call).
-            bot_token:  Bot token. Loaded from OS keyring if not provided.
+            channel_id:    Discord channel ID. Loaded from credential_store if not provided.
+            bot_token:     Bot token. Loaded from credential_store if not provided.
+            _skip_keyring: If True, skip credential_store lookup (caller already resolved values).
         """
         if not _DISCORD_AVAILABLE:
             raise ImportError(
@@ -171,6 +122,8 @@ class DiscordBackend(BackendBase):
         self._bot_token   = bot_token
         self._client: Optional[_GhostDriveDiscordClient] = None
         self._bot_task: Optional[asyncio.Task] = None
+        self._skip_keyring = _skip_keyring
+        self._session: Optional[aiohttp.ClientSession] = None
 
     # ── Connection lifecycle ──────────────────────────────────────────────────
 
@@ -182,8 +135,8 @@ class DiscordBackend(BackendBase):
             BackendAuthError:       No token in keyring.
             BackendConnectionError: Network unreachable.
         """
-        token      = self._bot_token or self._load_token_from_keyring()
-        channel_id = self._channel_id or self._load_channel_from_keyring()
+        token      = self._bot_token or (None if self._skip_keyring else self._load_token_from_keyring())
+        channel_id = self._channel_id or (None if self._skip_keyring else self._load_channel_from_keyring())
 
         if not token:
             raise BackendAuthError(
@@ -198,15 +151,28 @@ class DiscordBackend(BackendBase):
 
         self._channel_id = channel_id
         self._client     = _GhostDriveDiscordClient()
+        self._session    = aiohttp.ClientSession()
 
         # Start the bot in a background task (discord.py event loop requirement)
         loop = asyncio.get_running_loop()
         self._bot_task = loop.create_task(self._client.start(token))
 
         try:
+            # Wait for ready_event, but monitor the bot_task for early failures (e.g. invalid token, intent error)
             await asyncio.wait_for(self._client.ready_event.wait(), timeout=30)
+            if self._bot_task.done():
+                exc = self._bot_task.exception()
+                if exc is not None:
+                    raise exc
         except Exception as exc:
             await self.disconnect()
+            exc_name = type(exc).__name__
+            if "PrivilegedIntentsRequired" in exc_name:
+                raise BackendAuthError(
+                    "Discord connection failed: Privileged Intents Required.\n"
+                    "Please enable 'MESSAGE CONTENT INTENT' under the 'Bot' tab "
+                    "in the Discord Developer Portal for this bot."
+                ) from exc
             if isinstance(exc, asyncio.TimeoutError):
                 raise BackendConnectionError(
                     "Discord bot failed to connect within 30s."
@@ -222,6 +188,9 @@ class DiscordBackend(BackendBase):
         if self._client:
             await self._client.close()
             self._client = None
+        if self._session:
+            await self._session.close()
+            self._session = None
         if self._bot_task:
             self._bot_task.cancel()
             try:
@@ -235,28 +204,32 @@ class DiscordBackend(BackendBase):
 
     def store_credentials(self, bot_token: str, channel_id: int) -> None:
         """
-        Store bot token and channel_id in OS keyring.
-        Called once during the first-run wizard. Subsequent connect() calls
-        load from keyring automatically.
+        Encrypt and store bot token and channel_id via the process-global
+        credential_store (AES-256-GCM + OS Keyring).
+        Called once during the first-run wizard.
         """
-        if not _KEYRING_AVAILABLE:
-            logger.error("keyring library not available. Discord credentials NOT persisted.")
-            return
-
-        _keyring.set_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT_TOKEN, bot_token)
-        _keyring.set_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT_CHAN, str(channel_id))
-        logger.info("Discord credentials stored in OS keyring.")
+        try:
+            from ghostdrive.crypto.credential_store import credential_store
+            credential_store.store(_KEYRING_ACCOUNT_TOKEN, bot_token)
+            credential_store.store(_KEYRING_ACCOUNT_CHAN, str(channel_id))
+            logger.info("Discord credentials encrypted and stored in OS keyring.")
+        except Exception as exc:
+            logger.error("Failed to store Discord credentials via credential_store: %s", exc)
 
     def _load_token_from_keyring(self) -> Optional[str]:
-        if not _KEYRING_AVAILABLE:
+        try:
+            from ghostdrive.crypto.credential_store import credential_store
+            return credential_store.load(_KEYRING_ACCOUNT_TOKEN)
+        except Exception:
             return None
-        return _keyring.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT_TOKEN)
 
     def _load_channel_from_keyring(self) -> Optional[int]:
-        if not _KEYRING_AVAILABLE:
+        try:
+            from ghostdrive.crypto.credential_store import credential_store
+            val = credential_store.load(_KEYRING_ACCOUNT_CHAN)
+            return int(val) if val else None
+        except Exception:
             return None
-        val = _keyring.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT_CHAN)
-        return int(val) if val else None
 
     # ── BackendBase interface ─────────────────────────────────────────────────
 
@@ -352,21 +325,24 @@ class DiscordBackend(BackendBase):
         fresh_url = await self._fetch_fresh_cdn_url(message_id, channel_id)
         logger.debug("Discord: downloading message_id=%d via fresh CDN URL", message_id)
 
-        # Step 2: Download via aiohttp
+        # Step 2: Download via aiohttp — must be connected before calling download()
+        if self._session is None:
+            raise BackendConnectionError(
+                "Discord backend is not connected. Call connect() before download()."
+            )
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(fresh_url) as response:
-                    if response.status == 404:
-                        raise BackendNotFoundError(
-                            f"Discord CDN returned 404 for message {message_id}. "
-                            "The attachment may have been deleted."
-                        )
-                    if response.status != 200:
-                        raise BackendConnectionError(
-                            f"Discord CDN returned HTTP {response.status} "
-                            f"for message {message_id}."
-                        )
-                    data = await response.read()
+            async with self._session.get(fresh_url) as response:
+                if response.status == 404:
+                    raise BackendNotFoundError(
+                        f"Discord CDN returned 404 for message {message_id}. "
+                        "The attachment may have been deleted."
+                    )
+                if response.status != 200:
+                    raise BackendConnectionError(
+                        f"Discord CDN returned HTTP {response.status} "
+                        f"for message {message_id}."
+                    )
+                data = await response.read()
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise BackendConnectionError(
@@ -419,7 +395,7 @@ class DiscordBackend(BackendBase):
 
         try:
             t0 = time.perf_counter()
-            me = await self._client.fetch_user(self._client.user.id)
+            await self._client.fetch_user(self._client.user.id)
             latency_ms = (time.perf_counter() - t0) * 1000
 
             return HealthResult(reachable=True, quota_remaining=None, latency_ms=latency_ms)

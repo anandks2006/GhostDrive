@@ -45,7 +45,7 @@ class TestFileLock:
 
     def test_context_manager_releases_on_exit(self, test_file):
         with FileLock(test_file) as lock:
-            acquired = lock._acquired
+            pass
 
         assert not lock._acquired  # Released after context exit
         assert lock._fd is None

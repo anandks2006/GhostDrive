@@ -22,6 +22,8 @@ aiofiles      = "^23.2"          # Non-blocking file I/O for generator pipeline
 keyring       = "^25.2"          # OS keyring (libsecret/DPAPI/Keychain)
 zstandard     = "^0.22"          # zstd level 3 (fixed constant, never user-configurable)
 httpx         = { version = "^0.27", extras = ["socks"] }  # All backends, SOCKS5, streaming
+sqlcipher3    = "^0.6"           # Encrypted SQLite database layer
+psutil        = "^5.9"           # Process & system drive monitoring for polling fallback
 
 # ─── Backend dependencies (Month 3–4) ────────────────────────────────────────
 [tool.poetry.group.backends.dependencies]
@@ -30,7 +32,10 @@ boto3            = "^1.34"       # S3-compatible: Backblaze B2, Cloudflare R2, S
 huggingface-hub  = "^0.23"       # Git LFS, ml_artifacts_only flag
 internetarchive  = "^3.3"        # Archive.org – DISPOSABLE tier only
 ipfs-api         = "^0.2"        # IPFS CIDv1, pin verification via pinning service API
-mega-py3         = "^1.0"        # Mega.nz (primary); MEGAcmd subprocess fallback
+mega-py          = "^1.0"        # Mega.nz (primary); MEGAcmd subprocess fallback
+paramiko         = "^3.4"        # SFTP for NAS
+smbprotocol      = "^1.13"       # SMB/CIFS for NAS
+zeroconf         = "^0.131"      # mDNS for NAS discovery
 
 # ─── GUI dependencies (Month 6) ───────────────────────────────────────────────
 [tool.poetry.group.gui.dependencies]
