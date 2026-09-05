@@ -173,14 +173,11 @@ class TestChaosTests:
         assert km.is_unlocked
         
         # Simulating signal callback
-        from ghostdrive.gui.__main__ import _km_ref, clean_shutdown
+        from ghostdrive.web.state import state
+        state.km = km
         
-        # Inject KeystoreManager reference
-        import ghostdrive.gui.__main__
-        ghostdrive.gui.__main__._km_ref = km
-        
-        # Call clean_shutdown (which is what is invoked when QApplication is about to quit!)
-        clean_shutdown()
+        # Call clean_shutdown
+        state.clean_shutdown()
         
         # Master key must be locked/zeroed from memory
         assert not km.is_unlocked

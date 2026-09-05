@@ -16,7 +16,6 @@ from ghostdrive.pipeline.sharing import (
     CMD_SHARE_PACKAGE,
     CMD_CHUNK_DATA
 )
-from ghostdrive.gui.preflight_wizard import DiagnosticsWorker
 
 class MockStreamWriter:
     def __init__(self):
@@ -265,36 +264,14 @@ async def test_preflight_internet_check_non_blocking(monkeypatch):
         raise socket.gaierror("Mock DNS failure")
     monkeypatch.setattr(socket, "gethostbyname", mock_gethostbyname)
     
-    worker = DiagnosticsWorker()
+    from ghostdrive.web.routes.preflight import run_diagnostics
     
-    # Capture worker signals
-    results = []
-    def on_check_completed(name, success, msg):
-        results.append((name, success))
-        
-    worker.check_completed.connect(on_check_completed)
+    diag_res = run_diagnostics()
     
-    # Run diagnostics thread synchronously for testing
-    all_passed = True
-    
-    # Simulate worker.run() logic:
-    # 1. Keyring Check (passed)
-    worker.check_completed.emit("keyring", True, "Keyring write/read verified.")
-    
-    # 2. Database Check (passed)
-    worker.check_completed.emit("database", True, "Database write verified.")
-    
-    # 3. Network Check (failed)
-    net_ok = False
-    net_msg = "Local-Only Pipeline Active"
-    worker.check_completed.emit("network", net_ok, net_msg)
-    
-    # Assert that all_passed remains True because network failures do not set it to False
-    assert all_passed is True
-    assert len(results) == 3
-    assert results[0] == ("keyring", True)
-    assert results[1] == ("database", True)
-    assert results[2] == ("network", False)
+    # Assert that network_ok is False due to mock DNS failure, but all_passed remains True (local-only pipeline)
+    assert diag_res.network_ok is False
+    assert diag_res.network_msg == "Local-Only Pipeline Active"
+    assert diag_res.all_passed is True
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@ license = "AGPL-3.0"
 packages = [{ include = "ghostdrive" }]
 
 [tool.poetry.scripts]
-ghostdrive     = "ghostdrive.main:main"
+ghostdrive     = "ghostdrive.web.server:main"
 ghostdrive-cli = "ghostdrive.cli.ghostdrive_cli:main"
 
 # ─── Core dependencies (Month 1–4) ───────────────────────────────────────────
@@ -37,12 +37,14 @@ paramiko         = "^3.4"        # SFTP for NAS
 smbprotocol      = "^1.13"       # SMB/CIFS for NAS
 zeroconf         = "^0.131"      # mDNS for NAS discovery
 
-# ─── GUI dependencies (Month 6) ───────────────────────────────────────────────
-[tool.poetry.group.gui.dependencies]
-PyQt6     = "^6.6"               # Desktop GUI framework
-qasync    = "^0.27"              # asyncio event loop integration with Qt
-Pillow    = "^10.3"              # Image thumbnails
-pymupdf   = "^1.24"              # PDF first-page preview
+# ─── Web Application dependencies ─────────────────────────────────────────────
+[tool.poetry.group.web.dependencies]
+fastapi          = "^0.110"      # Web framework API layer
+uvicorn          = { version = "^0.29", extras = ["standard"] } # ASGI server
+websockets       = "^12.0"       # Real-time WebSocket streaming
+python-multipart = "^0.0.9"      # Form-data and file upload support
+Pillow           = "^10.3"       # Image thumbnails
+pymupdf          = "^1.24"       # PDF first-page preview
 
 # ─── Phase 2 dependencies (Month 7+) ─────────────────────────────────────────
 [tool.poetry.group.phase2.dependencies]
@@ -70,7 +72,7 @@ markers      = [
 
 [tool.coverage.run]
 source  = ["ghostdrive"]
-omit    = ["ghostdrive/gui/*", "ghostdrive/cli/*", "ghostdrive/backends/*"]
+omit    = ["ghostdrive/web/static/*", "ghostdrive/cli/*", "ghostdrive/backends/*"]
 
 [tool.coverage.report]
 show_missing = true

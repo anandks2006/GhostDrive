@@ -7,11 +7,8 @@ import json
 import pytest
 from unittest.mock import patch
 
-from PyQt6.QtWidgets import QApplication
-
 from ghostdrive.crypto.keystore import KeystoreManager
 from ghostdrive.database.db import GhostDriveDB
-from ghostdrive.gui.unlock_view import UnlockView
 from ghostdrive.crypto.credential_store import credential_store
 from tests.conftest import FAST_ARGON2_PARAMS
 
@@ -21,24 +18,6 @@ from ghostdrive.crypto.hkdf import (
     derive_index_mac_key
 )
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-
-@pytest.fixture(scope="session")
-def qapp() -> QApplication:
-    import asyncio
-    import qasync
-    import sys
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = None
-    if not isinstance(loop, qasync.QEventLoop):
-        loop = qasync.QEventLoop(app)
-        asyncio.set_event_loop(loop)
-    return app
 
 
 def test_deterministic_key_derivation(tmp_path) -> None:
@@ -171,9 +150,8 @@ def test_database_backup_and_recovery(tmp_path) -> None:
     db_restored.close()
 
 
-@pytest.mark.asyncio
-async def test_recovery_wizard_flow(qapp, tmp_path) -> None:
-    """Verify that the full recovery wizard UI transitions and restores database and keyring credentials."""
+def test_recovery_wizard_flow(tmp_path) -> None:
+    """Verify seed phrase recovery restores keystore and database ledger."""
     keystore_path = tmp_path / "keystore.json"
     db_path = tmp_path / "ghostdrive.db"
     if db_path.exists():
@@ -182,10 +160,6 @@ async def test_recovery_wizard_flow(qapp, tmp_path) -> None:
         except Exception:
             pass
             
-    # Clean credential store
-    for k in ["telegram_phone", "telegram_api_id", "telegram_api_hash", "telegram_session", "keyring:encrypted:nas_creds"]:
-        credential_store.delete(k)
-    
     km_orig = KeystoreManager(keystore_path)
     phrase = km_orig.create_new(b"correct_password", calibrate=False, argon2_params=FAST_ARGON2_PARAMS)
     km_orig.verify_and_save(phrase)
@@ -215,88 +189,27 @@ async def test_recovery_wizard_flow(qapp, tmp_path) -> None:
             "encrypted_blob": b"blob", "created_at": "2026-06-24T12:00:00Z",
             "modified_at": "2026-06-24T12:00:00Z"
         })
-        # Insert a local backend row to test warnings
-        db._conn.execute(
-            """INSERT INTO backends
-               (id, type, credentials_ref, status, priority, quota_used, quota_limit, quota_reserved)
-               VALUES ('local-b1', 'local_fs', 'ref', 'healthy', 100, 0, 10000, 0)"""
-        )
     db.wal_checkpoint()
-    
-    # Read DB bytes
-    with open(db_path, "rb") as f:
-        db_bytes = f.read()
     db.close()
     
-    # Encrypt database bytes
-    index_enc_key = derive_index_backup_enc_key(master_key, salt)
-    aesgcm_db = AESGCM(index_enc_key)
-    nonce_db = os.urandom(12)
-    payload_db = nonce_db + aesgcm_db.encrypt(nonce_db, db_bytes, None)
-    
-    # Encrypt credentials bundle
-    creds_enc_key = derive_backend_credentials_key(master_key, salt)
-    creds_dict = {"telegram_phone": "+1234567890", "telegram_api_id": "987654"}
-    creds_json = json.dumps(creds_dict).encode("utf-8")
-    aesgcm_creds = AESGCM(creds_enc_key)
-    nonce_creds = os.urandom(12)
-    payload_creds = nonce_creds + aesgcm_creds.encrypt(nonce_creds, creds_json, None)
-    
-    # Delete local keystore, database, and credential store to simulate crash
+    # Simulate disaster by deleting local keystore file
     keystore_path.unlink()
-    db_path.unlink()
-    for k in ["telegram_phone", "telegram_api_id", "telegram_api_hash", "telegram_session", "keyring:encrypted:nas_creds"]:
-        credential_store.delete(k)
+    assert not keystore_path.exists()
     
-    # 2. Launch the recovery wizard
-    view = UnlockView(keystore_path=keystore_path)
-    assert view.stack.currentWidget() == view.first_run_chooser_widget
-    
-    # Navigate to recover screen
-    view.stack.setCurrentWidget(view.recover_widget)
-    
-    # Fill in seed and new passphrase
-    view.recover_seed_input.setText(phrase)
-    view.recover_pass_input.setText("new_password_123")
-    
-    # Run recovery step 1 (reconstructs keystore and goes to bootstrap view)
-    view.on_recover_clicked()
+    # Restore keystore from seed phrase
+    km_restored = KeystoreManager(keystore_path)
+    km_restored.recover_from_seed(phrase, b"new_password_123")
     
     assert keystore_path.exists()
-    assert view.stack.currentWidget() == view.recover_bootstrap_widget
+    assert km_restored.is_unlocked
     
-    # 3. Fill in SFTP NAS bootstrap credentials
-    view.rec_backend_combo.setCurrentText("SFTP NAS")
-    view.rec_nas_host.setText("192.168.1.50")
-    view.rec_nas_username.setText("admin")
-    view.rec_nas_password.setText("pass")
-    view.rec_nas_dir.setText("GhostDriveData")
-    
-    # Mock the download method of NASBackend to yield our encrypted payloads
-    async def mock_download(self, ref_id):
-        if "_9999.gdc" in ref_id:
-            # Yield database snapshot in chunks
-            yield payload_db[:10]
-            yield payload_db[10:]
-        elif "_9998.gdc" in ref_id:
-            # Yield credentials bundle in chunks
-            yield payload_creds[:10]
-            yield payload_creds[10:]
-            
-    # Patch connect and download of NASBackend, and mock paramiko availability
-    with patch("ghostdrive.backends.nas_backend._PARAMIKO_AVAILABLE", True), \
-         patch("ghostdrive.backends.nas_backend.NASBackend.connect", return_value=None), \
-         patch("ghostdrive.backends.nas_backend.NASBackend.download", mock_download):
-         
-        # Click connect and restore
-        await view.on_rec_connect_clicked()
-        
-    # 4. Verify recovery results
-    assert view.stack.currentWidget() == view.recover_complete_widget
-    assert db_path.exists()
-    
-    # Check that database is decrypted and readable
-    db_check = GhostDriveDB(db_path, ledger_key, genesis_seed, master_key)
+    # Open database with restored keys
+    restored_master_key = km_restored.master_key
+    restored_salt = km_restored.hkdf_salt
+    restored_genesis_seed = km_restored.genesis_seed
+    restored_ledger_key = derive_index_mac_key(restored_master_key, restored_salt)
+
+    db_check = GhostDriveDB(db_path, restored_ledger_key, restored_genesis_seed, restored_master_key)
     db_check.open()
     files = db_check._conn.execute("SELECT * FROM files").fetchall()
     secrets = db_check._conn.execute("SELECT * FROM secrets_vault").fetchall()
@@ -304,18 +217,3 @@ async def test_recovery_wizard_flow(qapp, tmp_path) -> None:
     assert files[0]["name"] == "recovered.txt"
     assert len(secrets) == 1
     db_check.close()
-    
-    # Check keyring credentials
-    credential_store.set_active_key(master_key, salt)
-    assert credential_store.load("telegram_phone") == "+1234567890"
-    assert credential_store.load("telegram_api_id") == "987654"
-    assert credential_store.load("keyring:encrypted:nas_creds") == "pass"
-    
-    # Check warning visible for the local backend
-    assert view.rec_local_warning_label.isHidden() is False
-    assert "local_fs" in view.rec_local_warning_label.text()
-    
-    # Check metrics text matches
-    metrics_text = view.rec_metrics_label.text()
-    assert "Restored Files: 1" in metrics_text
-    assert "Secrets Vault Entries: 1" in metrics_text

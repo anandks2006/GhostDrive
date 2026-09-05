@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GhostDrive - Encrypted Redundant Cloud</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body class="dark-theme">
+
+  <!-- ─── PREFLIGHT DIAGNOSTICS MODAL ──────────────────────────────────────── -->
+  <div id="preflight-modal" class="modal-overlay active">
+    <div class="glass-card modal-box">
+      <div class="modal-header">
+        <h2>⚡ Pre-Flight System Diagnostics</h2>
+        <p class="subtitle">Verifying cryptographic keyring, storage access, and reachability</p>
+      </div>
+      <div class="checklist">
+        <div class="check-item" id="check-keyring"><span class="icon">🔑</span> OS Keyring: <span class="status">Testing...</span></div>
+        <div class="check-item" id="check-db"><span class="icon">💽</span> Database Storage Access: <span class="status">Testing...</span></div>
+        <div class="check-item" id="check-net"><span class="icon">🌐</span> Network Connectivity: <span class="status">Testing...</span></div>
+        <div class="check-item" id="check-sys"><span class="icon">⚙️</span> System Environment (Long Paths / inotify): <span class="status">Testing...</span></div>
+      </div>
+      <div class="progress-bar-container">
+        <div class="progress-bar" id="preflight-progress" style="width: 0%;"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-retest-diag" class="btn btn-secondary" disabled>Retry Checks</button>
+        <button id="btn-proceed-diag" class="btn btn-primary" disabled>Proceed to App</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── UNLOCK / FIRST-RUN SETUP SCREEN ───────────────────────────────────── -->
+  <div id="auth-screen" class="screen hidden">
+    <div class="auth-card glass-card">
+      <div class="brand">
+        <div class="logo-icon">👻</div>
+        <h1>GHOSTDRIVE</h1>
+        <p class="tagline">Encrypted · Redundant · Multi-Backend Personal Cloud</p>
+      </div>
+
+      <!-- Unlock Form -->
+      <div id="unlock-form" class="auth-view">
+        <h3>Unlock Keystore</h3>
+        <p class="muted">Enter your master passphrase to decrypt your keystore and database ledger.</p>
+        <div class="form-group">
+          <label>Master Passphrase</label>
+          <input type="password" id="unlock-passphrase" placeholder="Enter passphrase..." autofocus>
+        </div>
+        <div class="error-msg hidden" id="unlock-error">Incorrect password. Please try again.</div>
+        <button id="btn-unlock" class="btn btn-primary btn-block">Unlock Vault</button>
+        <div class="auth-options">
+          <a href="#" id="link-restore">Restore from Seed Phrase</a>
+        </div>
+      </div>
+
+      <!-- Setup Form (First Run) -->
+      <div id="setup-form" class="auth-view hidden">
+        <h3>Initialize GhostDrive Vault</h3>
+        <p class="muted">Set a master passphrase to secure your cryptographic key derivation buffer.</p>
+        <div class="form-group">
+          <label>Create Passphrase</label>
+          <input type="password" id="setup-passphrase" placeholder="Choose a strong passphrase...">
+        </div>
+        <div class="form-group">
+          <label>Confirm Passphrase</label>
+          <input type="password" id="setup-confirm" placeholder="Confirm passphrase...">
+        </div>
+        <button id="btn-create-vault" class="btn btn-primary btn-block">Create New Vault</button>
+      </div>
+
+      <!-- Seed Phrase Display Modal Step -->
+      <div id="seed-display-view" class="auth-view hidden">
+        <h3>🔑 BIP39 24-Word Genesis Seed</h3>
+        <p class="warning-box">⚠️ Store these 24 words in a secure location. They are required to recover your vault if your password is forgotten.</p>
+        <div class="seed-box" id="seed-words-container"></div>
+        <button id="btn-confirm-seed" class="btn btn-primary btn-block">I Have Saved My Seed Phrase</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── MAIN DASHBOARD APPLICATION ────────────────────────────────────────── -->
+  <div id="main-app" class="app-layout hidden">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar glass-panel">
+      <div class="brand">
+        <span class="logo-icon">👻</span>
+        <span class="brand-name">GhostDrive</span>
+      </div>
+      <nav class="nav-menu">
+        <button class="nav-btn active" data-target="files-view"><span class="icon">📁</span> Files</button>
+        <button class="nav-btn" data-target="backends-view"><span class="icon">⚡</span> Storage Backends</button>
+        <button class="nav-btn" data-target="analytics-view"><span class="icon">📊</span> Analytics</button>
+        <button class="nav-btn" data-target="resilience-view"><span class="icon">🛡️</span> Health & Scrub</button>
+        <button class="nav-btn" data-target="smart-view"><span class="icon">🧠</span> Smart Engine</button>
+        <button class="nav-btn" data-target="secrets-view"><span class="icon">🔑</span> Secrets</button>
+        <button class="nav-btn" data-target="sharing-view"><span class="icon">🔗</span> Shared Media</button>
+        <button class="nav-btn" data-target="telemetry-view"><span class="icon">📈</span> Live Telemetry</button>
+        <button class="nav-btn" data-target="settings-view"><span class="icon">⚙️</span> Settings</button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="vault-status"><span class="pulse-dot"></span> Vault Unlocked</div>
+        <button id="btn-lock-vault" class="btn btn-sm btn-secondary">Lock Vault</button>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Header Bar -->
+      <header class="top-bar glass-panel">
+        <div class="search-box">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="global-search" placeholder="Search files, hashes, or tags...">
+        </div>
+        <div class="header-actions">
+          <button id="btn-quick-upload" class="btn btn-primary">+ Upload File</button>
+          <div class="theme-indicator" id="theme-toggle">🌙</div>
+        </div>
+      </header>
+
+      <!-- View Containers -->
+
+      <!-- 1. FILES VIEW -->
+      <section id="files-view" class="view-panel active">
+        <div class="panel-header">
+          <div class="breadcrumbs" id="file-breadcrumbs">
+            <span class="crumb active" data-path="/">Root</span>
+          </div>
+          <div class="view-toggles">
+            <button class="filter-btn active" data-cat="all">All</button>
+            <button class="filter-btn" data-cat="images">Images</button>
+            <button class="filter-btn" data-cat="documents">Docs</button>
+            <button class="filter-btn" data-cat="media">Media</button>
+            <button class="filter-btn" data-cat="archives">Archives</button>
+          </div>
+        </div>
+
+        <!-- Drag & Drop Upload Zone -->
+        <div id="drop-zone" class="drop-zone">
+          <p>📥 Drag & Drop files here to encrypt & replicate across backends</p>
+        </div>
+
+        <!-- Files List Table -->
+        <div class="glass-card table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Redundancy Tier</th>
+                <th>Modified</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="files-table-body">
+              <!-- Dynamically rendered -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 2. BACKENDS VIEW -->
+      <section id="backends-view" class="view-panel">
+        <div class="panel-header">
+          <h2>⚡ Multi-Backend Storage Tiers</h2>
+          <button class="btn btn-secondary" id="btn-test-all-backends">Test All Backends</button>
+        </div>
+        <div class="backend-grid" id="backend-cards-container">
+          <!-- Dynamically populated backend cards -->
+        </div>
+      </section>
+
+      <!-- 3. ANALYTICS VIEW -->
+      <section id="analytics-view" class="view-panel">
+        <div class="panel-header">
+          <h2>📊 Storage Analytics & Efficiency</h2>
+        </div>
+        <div class="stats-grid">
+          <div class="glass-card stat-card">
+            <div class="stat-title">Logical Files Volume</div>
+            <div class="stat-value" id="stat-logical">14.65 GB</div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-title">Physical Replicated Volume</div>
+            <div class="stat-value" id="stat-physical">8.00 GB</div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-title">Deduplication Savings</div>
+            <div class="stat-value accent" id="stat-dedup">4.00 GB (1.45x)</div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-title">Compression Savings</div>
+            <div class="stat-value accent" id="stat-zstd">2.64 GB</div>
+          </div>
+        </div>
+        <div class="analytics-charts-grid">
+          <div class="glass-card chart-box">
+            <h3>Redundancy Tier Distribution</h3>
+            <div class="tier-bars-container" id="tier-bars"></div>
+          </div>
+          <div class="glass-card chart-box">
+            <h3>Backend Storage Breakdown</h3>
+            <div class="backend-usage-bars" id="backend-bars"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. HEALTH & RESILIENCE VIEW -->
+      <section id="resilience-view" class="view-panel">
+        <div class="panel-header">
+          <h2>🛡️ Integrity Scrubbing & Erasure Coding</h2>
+          <button class="btn btn-primary" id="btn-trigger-scrub">Run Integrity Scrub</button>
+        </div>
+        <div class="resilience-overview glass-card">
+          <div class="health-score-ring">
+            <div class="score-number" id="health-score-val">99.8%</div>
+            <div class="score-label">Chunk Health Score</div>
+          </div>
+          <div class="ec-details">
+            <h4>Reed-Solomon Erasure Scheme</h4>
+            <p>Configured: <strong>zfec 4+2 Shards</strong> (4 Data + 2 Parity)</p>
+            <p class="muted">Tolerates complete failure or corruption of 2 remote backends without data loss.</p>
+          </div>
+        </div>
+        <div class="glass-card console-box">
+          <h3>Integrity Scrub Logs</h3>
+          <pre id="scrub-log-console" class="log-output"></pre>
+        </div>
+      </section>
+
+      <!-- 5. SMART ENGINE VIEW -->
+      <section id="smart-view" class="view-panel">
+        <div class="panel-header">
+          <h2>🧠 Smart Engine & Policy Controls</h2>
+        </div>
+        <div class="glass-card form-card">
+          <div class="setting-row">
+            <div>
+              <div class="setting-title">Auto-Tiering Engine</div>
+              <div class="setting-desc">Automatically move unused files to cold/disposable tiers after threshold</div>
+            </div>
+            <input type="checkbox" id="smart-autotier" checked>
+          </div>
+          <div class="setting-row">
+            <div>
+              <div class="setting-title">Thermal Throttling & Backpressure</div>
+              <div class="setting-desc">Throttle background upload workers if CPU temperature exceeds limits</div>
+            </div>
+            <input type="checkbox" id="smart-thermal" checked>
+          </div>
+          <div class="setting-row">
+            <div>
+              <div class="setting-title">Bandwidth Throttle Limit (KB/s)</div>
+              <div class="setting-desc">0 for unlimited maximum speed</div>
+            </div>
+            <input type="number" id="smart-bandwidth" value="0">
+          </div>
+        </div>
+      </section>
+
+      <!-- 6. SECRETS VIEW -->
+      <section id="secrets-view" class="view-panel">
+        <div class="panel-header">
+          <h2>🔑 Secrets & Keystore Management</h2>
+        </div>
+        <div class="glass-card form-card">
+          <h3>Master Seed Phrase</h3>
+          <p class="muted">View or backup your 24-word BIP39 genesis seed phrase.</p>
+          <button class="btn btn-secondary" id="btn-reveal-seed">Reveal 24-Word Seed Phrase</button>
+          <hr class="divider">
+          <h3>Change Master Passphrase</h3>
+          <div class="form-group">
+            <label>Current Passphrase</label>
+            <input type="password" id="change-pass-current">
+          </div>
+          <div class="form-group">
+            <label>New Passphrase</label>
+            <input type="password" id="change-pass-new">
+          </div>
+          <button class="btn btn-primary" id="btn-submit-change-pass">Update Passphrase</button>
+        </div>
+      </section>
+
+      <!-- 7. SHARED MEDIA VIEW -->
+      <section id="sharing-view" class="view-panel">
+        <div class="panel-header">
+          <h2>🔗 Shared Media & Public Links</h2>
+        </div>
+        <div class="glass-card table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Link ID</th>
+                <th>File</th>
+                <th>Created</th>
+                <th>Expires</th>
+                <th>Access Count</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="shared-links-body">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 8. LIVE TELEMETRY VIEW -->
+      <section id="telemetry-view" class="view-panel">
+        <div class="panel-header">
+          <h2>📈 Live Telemetry & Pipeline Monitor</h2>
+        </div>
+        <div class="stats-grid">
+          <div class="glass-card stat-card">
+            <div class="stat-title">Upload Speed</div>
+            <div class="stat-value accent" id="tel-upload">0.0 KB/s</div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-title">Download Speed</div>
+            <div class="stat-value accent" id="tel-download">0.0 KB/s</div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-title">Active Workers</div>
+            <div class="stat-value" id="tel-threads">8 Threads</div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-title">RAM / CPU Usage</div>
+            <div class="stat-value" id="tel-resources">-- MB / -- %</div>
+          </div>
+        </div>
+        <div class="glass-card console-box mt-16">
+          <h3>Real-time Event Feed</h3>
+          <pre id="telemetry-log-feed" class="log-output"></pre>
+        </div>
+      </section>
+
+      <!-- 9. SETTINGS VIEW -->
+      <section id="settings-view" class="view-panel">
+        <div class="panel-header">
+          <h2>⚙️ Application Preferences</h2>
+        </div>
+        <div class="glass-card form-card">
+          <div class="setting-row">
+            <div>
+              <div class="setting-title">Launch on System Startup</div>
+              <div class="setting-desc">Start GhostDrive in background on boot</div>
+            </div>
+            <input type="checkbox" id="sett-autostart">
+          </div>
+          <div class="setting-row">
+            <div>
+              <div class="setting-title">Desktop Notifications</div>
+              <div class="setting-desc">Display system toast alerts for upload completions & scrub alerts</div>
+            </div>
+            <input type="checkbox" id="sett-notifications" checked>
+          </div>
+          <div class="form-group mt-16">
+            <label>Accent Color</label>
+            <input type="color" id="sett-accent" value="#8b5cf6">
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- File Upload Modal with Tier Advisor -->
+  <div id="upload-modal" class="modal-overlay">
+    <div class="glass-card modal-box">
+      <div class="modal-header">
+        <h2>📤 Upload File to GhostDrive</h2>
+      </div>
+      <div class="form-group">
+        <label>Select File</label>
+        <input type="file" id="modal-file-input">
+      </div>
+      <div id="tier-advisor-banner" class="tier-advisor-banner hidden">
+        <strong>💡 Redundancy Tier Advisor Suggestion:</strong>
+        <p id="advisor-recommendation"></p>
+      </div>
+      <div class="form-group">
+        <label>Storage Redundancy Tier</label>
+        <select id="modal-tier-select">
+          <option value="CRITICAL">CRITICAL (4x Redundancy - Keys & Credentials)</option>
+          <option value="IMPORTANT" selected>IMPORTANT (3x Redundancy - Photos & Documents)</option>
+          <option value="DISPOSABLE">DISPOSABLE (2x Redundancy - ML Datasets & Archives)</option>
+        </select>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancel-upload" class="btn btn-secondary">Cancel</button>
+        <button id="btn-confirm-upload" class="btn btn-primary">Start Encrypted Upload</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
