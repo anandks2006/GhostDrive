@@ -2,10 +2,17 @@
 smart.py -- Smart engine controls, auto-tiering policy, and thermal backpressure settings.
 """
 
-from fastapi import APIRouter
+import logging
+
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ghostdrive.services import smart as smart_service
+
+logger = logging.getLogger("ghostdrive_web.smart")
+
 router = APIRouter(prefix="/api/smart", tags=["smart"])
+
 
 class SmartEngineConfig(BaseModel):
     background_sync: bool = True
@@ -13,29 +20,28 @@ class SmartEngineConfig(BaseModel):
     auto_tiering_days_unused: int = 30
     thermal_throttling_enabled: bool = True
     max_cpu_percent_cap: int = 80
-    bandwidth_limit_kbps: int = 0  # 0 = unlimited
+    bandwidth_limit_kbps: int = 0
     battery_saver_pause: bool = True
+
 
 @router.get("/config")
 def get_smart_config() -> dict:
-    return {
-        "background_sync": True,
-        "auto_tiering_enabled": True,
-        "auto_tiering_days_unused": 30,
-        "thermal_throttling_enabled": True,
-        "max_cpu_percent_cap": 80,
-        "bandwidth_limit_kbps": 0,
-        "battery_saver_pause": True,
-        "thermal_state": {
-            "cpu_temp_celsius": 48.5,
-            "throttling_active": False,
-            "current_backpressure_factor": 1.0
-        }
-    }
+    try:
+        cfg = smart_service.load_config()
+        return {**cfg, "thermal_state": smart_service.thermal_state(cfg)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 @router.post("/config")
 def update_smart_config(cfg: SmartEngineConfig) -> dict:
-    return {
-        "status": "success",
-        "message": "Smart engine configuration updated successfully."
-    }
+    try:
+        saved = smart_service.save_config(cfg.model_dump())
+        return {
+            "status": "success",
+            "config": saved,
+            "thermal_state": smart_service.thermal_state(saved),
+            "message": "Smart engine configuration updated and applied.",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

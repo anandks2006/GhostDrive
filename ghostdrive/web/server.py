@@ -22,11 +22,24 @@ from ghostdrive.web.routes import (
     backends,
     analytics,
     resilience,
+    hostility,
     smart,
     secrets,
     settings,
     sharing,
     telemetry,
+    protection,
+    recovery,
+    portable,
+    monitoring,
+    sync,
+    update,
+)
+from ghostdrive.services import protection as protection_service
+from ghostdrive.services.alerts import start_alerts_scheduler, stop_alerts_scheduler
+from ghostdrive.services.restore_drills import (
+    start_drill_scheduler,
+    stop_drill_scheduler,
 )
 from ghostdrive.utils.log_sanitizer import SanitizedFormatter
 
@@ -49,8 +62,15 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("GhostDrive Web Server started.")
+    protection_service.start_watcher()
+    # Both schedulers are double-start no-ops and tolerate a locked vault.
+    start_drill_scheduler()
+    start_alerts_scheduler()
     yield
     logger.info("GhostDrive Web Server shutting down...")
+    stop_drill_scheduler()
+    stop_alerts_scheduler()
+    protection_service.stop_watcher()
     state.clean_shutdown()
 
 app = FastAPI(
@@ -67,11 +87,19 @@ app.include_router(files.router)
 app.include_router(backends.router)
 app.include_router(analytics.router)
 app.include_router(resilience.router)
+app.include_router(hostility.router)
 app.include_router(smart.router)
 app.include_router(secrets.router)
 app.include_router(settings.router)
 app.include_router(sharing.router)
+app.include_router(sharing.public_router)
 app.include_router(telemetry.router)
+app.include_router(protection.router)
+app.include_router(recovery.router)
+app.include_router(portable.router)
+app.include_router(monitoring.router)
+app.include_router(sync.router)
+app.include_router(update.router)
 
 # Mount Static Assets
 static_dir = Path(__file__).parent / "static"
@@ -84,6 +112,22 @@ async def serve_index():
     if index_path.exists():
         return FileResponse(str(index_path))
     return HTMLResponse("<h2>GhostDrive Web App loading...</h2>")
+
+@app.get("/manifest.webmanifest")
+async def serve_manifest():
+    """Serve the PWA manifest with the correct MIME type for installability."""
+    manifest_path = static_dir / "manifest.webmanifest"
+    if manifest_path.exists():
+        return FileResponse(str(manifest_path), media_type="application/manifest+json")
+    return HTMLResponse("<h2>Manifest not available.</h2>", status_code=404)
+
+@app.get("/serviceworker.js")
+async def serve_service_worker():
+    """Serve the service worker from the root scope (a /static/ worker could only claim /static/*)."""
+    worker_path = static_dir / "serviceworker.js"
+    if worker_path.exists():
+        return FileResponse(str(worker_path), media_type="text/javascript")
+    return HTMLResponse("<h2>Service worker not available.</h2>", status_code=404)
 
 def find_available_port(start_port: int = 8000, max_attempts: int = 20) -> int:
     import socket

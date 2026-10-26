@@ -47,13 +47,14 @@ def run_diagnostics() -> DiagnosticsResponse:
 
     # 2. Database Write Access Check
     db_ok = True
-    db_msg = "Database directory is writable."
-    test_file = ".gd_write_test"
+    db_msg = "Application data directory is writable."
     try:
-        with open(test_file, "w") as f:
-            f.write("test")
-        if os.path.exists(test_file):
-            os.remove(test_file)
+        import tempfile
+        from ghostdrive.web.state import state
+        state.app_data_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=state.app_data_dir, prefix=".gd_write_", delete=True) as handle:
+            handle.write(b"test")
+            handle.flush()
     except Exception as exc:
         db_ok = False
         db_msg = f"Write access check failed: {exc}"

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from ghostdrive.web.state import state
+from ghostdrive.crypto.credential_store import credential_store
 from ghostdrive.crypto.keystore import KeystoreManager
 from ghostdrive.database.db import GhostDriveDB
 from ghostdrive.crypto.hkdf import derive_index_mac_key
@@ -52,6 +53,13 @@ def _open_db(unlocked_km: KeystoreManager) -> None:
     db = GhostDriveDB(state.db_path, ledger_key, genesis_seed, master_key)
     db.open()
     state.db = db
+    credential_store.set_active_key(bytes(master_key), bytes(hkdf_salt))
+    state.load_persisted_settings()
+    try:
+        from ghostdrive.services.smart import apply_saved
+        apply_saved()
+    except Exception as exc:
+        logger.debug("Smart engine settings not applied: %s", exc)
 
 @router.get("/status", response_model=AuthStatusResponse)
 def get_auth_status() -> AuthStatusResponse:

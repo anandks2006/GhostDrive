@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 class SettingsUpdateModel(BaseModel):
     theme: str = "dark"
-    accent_color: str = "#8b5cf6"
+    accent_color: str = "#c4f56a"
     autostart: bool = False
     desktop_notifications: bool = True
     log_level: str = "INFO"
@@ -26,20 +26,19 @@ def get_settings() -> dict:
 @router.post("/")
 def update_settings(req: SettingsUpdateModel) -> dict:
     state.settings.update(req.model_dump())
-    
-    # Handle autostart platform update if requested
-    if req.autostart:
-        try:
-            from ghostdrive.platform.autostart import set_autostart
-            set_autostart(True)
-        except Exception:
-            pass
-    else:
-        try:
-            from ghostdrive.platform.autostart import set_autostart
-            set_autostart(False)
-        except Exception:
-            pass
+
+    try:
+        from ghostdrive.platform.autostart import set_autostart
+        set_autostart(bool(req.autostart))
+    except Exception as exc:
+        import logging
+        logging.getLogger("ghostdrive.web.settings").warning("Autostart update failed: %s", exc)
+
+    try:
+        state.persist_settings()
+    except Exception as exc:
+        import logging
+        logging.getLogger("ghostdrive.web.settings").warning("Could not persist settings: %s", exc)
 
     return {
         "status": "success",

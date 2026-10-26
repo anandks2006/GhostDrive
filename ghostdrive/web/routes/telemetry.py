@@ -3,30 +3,37 @@ telemetry.py -- Live WebSocket telemetry streaming and bandwidth monitoring rout
 """
 
 import asyncio
-import random
-import psutil
 import logging
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from ghostdrive.services.telemetry import meter, system_stats
 from ghostdrive.web.state import state
 
 logger = logging.getLogger("ghostdrive_web.telemetry")
 
 router = APIRouter(prefix="/api/telemetry", tags=["telemetry"])
 
+
+def _snapshot() -> dict:
+    sample = meter.sample()
+    stats = system_stats()
+    return {
+        "upload_speed_kbps": sample["upload_speed_kbps"],
+        "download_speed_kbps": sample["download_speed_kbps"],
+        "active_threads": stats["active_threads"],
+        "cpu_usage_percent": stats["cpu_usage_percent"],
+        "ram_usage_mb": stats["ram_usage_mb"],
+        "active_uploads": len(state.active_uploads),
+        "active_downloads": len(state.active_downloads),
+        "log_message": sample["last_message"],
+    }
+
+
 @router.get("/stats")
 def get_telemetry_stats() -> dict:
-    cpu_percent = psutil.cpu_percent(interval=None)
-    mem = psutil.virtual_memory()
-    return {
-        "upload_speed_kbps": round(random.uniform(120, 850), 2),
-        "download_speed_kbps": round(random.uniform(500, 3200), 2),
-        "active_threads": 8,
-        "cpu_usage_percent": cpu_percent,
-        "ram_usage_mb": round(mem.used / (1024 * 1024), 2),
-        "active_uploads": len(state.active_uploads),
-        "active_downloads": len(state.active_downloads)
-    }
+    return _snapshot()
+
 
 @router.websocket("/ws")
 async def websocket_telemetry_stream(websocket: WebSocket):
@@ -34,24 +41,12 @@ async def websocket_telemetry_stream(websocket: WebSocket):
     state.telemetry_clients.add(websocket)
     try:
         while True:
-            cpu_percent = psutil.cpu_percent(interval=None)
-            mem = psutil.virtual_memory()
-            sample = {
-                "type": "telemetry_tick",
-                "upload_speed_kbps": round(random.uniform(120, 850), 2),
-                "download_speed_kbps": round(random.uniform(500, 3200), 2),
-                "active_threads": 8,
-                "cpu_usage_percent": cpu_percent,
-                "ram_usage_mb": round(mem.used / (1024 * 1024), 2),
-                "active_uploads": len(state.active_uploads),
-                "active_downloads": len(state.active_downloads),
-                "log_message": "Pipeline active - chunk integrity verified."
-            }
-            await websocket.send_json(sample)
+            payload = {"type": "telemetry_tick", **_snapshot()}
+            await websocket.send_json(payload)
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:
-        state.telemetry_clients.remove(websocket)
+        pass
     except Exception as exc:
-        logger.warning("WebSocket disconnect: %s", exc)
-        if websocket in state.telemetry_clients:
-            state.telemetry_clients.remove(websocket)
+        logger.debug("Telemetry websocket closed: %s", exc)
+    finally:
+        state.telemetry_clients.discard(websocket)
