@@ -83,6 +83,9 @@ class FileLock:
         self._fd: Optional[int]    = None
         self._acquired             = False
         self._windows_lock_bytes   = 0
+        self._windows_overlapped   = None
+        self._windows_lock_fd      = None
+        self._windows_lock_path    = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -138,11 +141,45 @@ class FileLock:
                 if _PLATFORM == "posix":
                     fcntl.flock(self._fd, fcntl.LOCK_UN)
                 elif _PLATFORM == "windows" and self._windows_lock_bytes > 0:
-                    os.lseek(self._fd, 0, os.SEEK_SET)
-                    msvcrt.locking(self._fd, msvcrt.LK_UNLCK, self._windows_lock_bytes)
+                    import ctypes
+                    from ctypes import wintypes
+
+                    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                    kernel32.UnlockFileEx.argtypes = [
+                        wintypes.HANDLE,
+                        wintypes.DWORD,
+                        wintypes.DWORD,
+                        wintypes.DWORD,
+                        ctypes.POINTER(type(self._windows_overlapped)),
+                    ]
+                    kernel32.UnlockFileEx.restype = wintypes.BOOL
+                    if self._windows_lock_fd is not None:
+                        handle = msvcrt.get_osfhandle(self._windows_lock_fd)
+                        kernel32.UnlockFileEx(
+                            handle,
+                            0,
+                            self._windows_lock_bytes,
+                            0,
+                            ctypes.byref(self._windows_overlapped),
+                        )
+                    self._windows_overlapped = None
         except OSError as exc:
             logger.warning("Error releasing file lock for %s: %s", self.path, exc)
         finally:
+            if self._windows_lock_fd is not None:
+                try:
+                    os.close(self._windows_lock_fd)
+                except OSError:
+                    pass
+                self._windows_lock_fd = None
+            lock_path = self._windows_lock_path
+            self._windows_lock_path = None
+            if lock_path is not None and _PLATFORM == "windows":
+                try:
+                    Path(lock_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._windows_lock_bytes = 0
             self._close_fd()
             self._acquired = False
 
@@ -164,10 +201,12 @@ class FileLock:
 
     def _acquire_windows(self) -> None:
         """
-        Byte-range advisory lock via ``msvcrt.locking`` (Windows).
+        Shared byte-range lock via ``LockFileEx`` (Windows).
 
-        Locks from byte 0 to min(file_size, MAX_LOCK_BYTES).
-        Empty files get no lock (no bytes to lock).
+        An exclusive ``msvcrt.locking`` lock would also deny our own readers,
+        so we take a *shared* lock: concurrent readers (the encryptor and the
+        hasher) are allowed while writers are excluded.  Locks bytes 0 through
+        min(file_size, MAX_LOCK_BYTES); empty files get no lock.
         """
         try:
             file_size = self.path.stat().st_size
@@ -175,13 +214,51 @@ class FileLock:
             file_size = 0
 
         if file_size == 0:
-            # No bytes to lock; return without error
             return
 
-        lock_bytes = min(file_size, _MAX_LOCK_BYTES)
-        os.lseek(self._fd, 0, os.SEEK_SET)
-        msvcrt.locking(self._fd, msvcrt.LK_NBLCK, lock_bytes)
-        self._windows_lock_bytes = lock_bytes
+        import ctypes
+        from ctypes import wintypes
+
+        class OVERLAPPED(ctypes.Structure):
+            _fields_ = [
+                ("Internal", ctypes.c_void_p),
+                ("InternalHigh", ctypes.c_void_p),
+                ("Offset", wintypes.DWORD),
+                ("OffsetHigh", wintypes.DWORD),
+                ("hEvent", wintypes.HANDLE),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.LockFileEx.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(OVERLAPPED),
+        ]
+        kernel32.LockFileEx.restype = wintypes.BOOL
+
+        # Lock a sibling control file rather than the data bytes. Windows
+        # byte-range locks are mandatory: locking the data would also deny the
+        # pipeline's own reader handles. The sidecar still gives us
+        # process-level exclusivity and never blocks reads of the data file.
+        lock_path = self.path.with_name(self.path.name + ".gdl")
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        overlapped = OVERLAPPED()
+        handle = msvcrt.get_osfhandle(lock_fd)
+        # LOCKFILE_EXCLUSIVE_LOCK (0x2) | LOCKFILE_FAIL_IMMEDIATELY (0x1)
+        if not kernel32.LockFileEx(
+            handle, 0x3, 0, 1, 0, ctypes.byref(overlapped)
+        ):
+            error = ctypes.get_last_error()
+            os.close(lock_fd)
+            raise OSError(error, "LockFileEx failed")
+
+        self._windows_lock_fd = lock_fd
+        self._windows_lock_path = lock_path
+        self._windows_lock_bytes = 1
+        self._windows_overlapped = overlapped
 
     def _warn_and_skip(self, reason: str) -> None:
         """Log a warning and set lock_skipped = True."""

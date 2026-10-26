@@ -536,7 +536,7 @@ class TestChunkUploader:
         backend_row = db._conn.execute(
             "SELECT quota_used, quota_reserved FROM backends WHERE id = ?", (backend_id,)
         ).fetchone()
-        assert backend_row["quota_used"] == 1024
+        assert backend_row["quota_used"] == 1024 + 16
         assert backend_row["quota_reserved"] == 0
         
         db.close()

@@ -10,7 +10,7 @@ __spec_version__ = "1.2"
 __author__ = "Anand K S"
 
 def main() -> None:
-    """Launch the GhostDrive GUI application."""
-    from ghostdrive.gui.__main__ import main as gui_main
-    gui_main()
+    """Launch the GhostDrive web application."""
+    from ghostdrive.web.server import main as web_main
+    web_main()
 

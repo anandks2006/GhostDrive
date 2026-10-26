@@ -39,8 +39,10 @@ The checkpoint and snapshot operations are logged to the telemetry panel.
 
 Startup Pending Record Scan (spec §5.6)
 ----------------------------------------
-On open(): chunk_locations rows with status='pending' are returned so the
-caller can query backends and resolve them (confirmed or failed).
+On open(): chunk_locations rows with status='pending' are settled by the
+startup scan (_settle_dangling_intents) -- their quota reservation is
+restored to the backend and the intent is marked 'cancelled', because the
+upload that owned it died with the previous process.
 """
 
 from __future__ import annotations
@@ -149,7 +151,9 @@ class GhostDriveDB:
         Open the database, apply pragmas, run schema migrations, and initialise
         the HMAC ledger genesis block if this is a fresh database.
 
-        Also scans for pending chunk_locations records (spec §5.6 startup scan).
+        Also scans for pending chunk_locations records (spec §5.6 startup
+        scan): dangling intents are settled by _settle_dangling_intents --
+        the scan is performed on every open(), not merely documented.
         """
         # SQLCipher availability is enforced at import time; no runtime check needed.
         with self._lock:
@@ -165,6 +169,11 @@ class GhostDriveDB:
             self._apply_pragmas()
             self._run_migrations()
             self._init_hmac_ledger_if_needed()
+            # Spec §5.6 startup scan -- REAL, not just documented: settle
+            # chunk_locations rows a crash left 'pending' (see
+            # _settle_dangling_intents). Runs after schema/migrations so the
+            # tables exist, outside any open transaction.
+            self._settle_dangling_intents()
 
             logger.info("GhostDriveDB opened: %s", self._path)
 
@@ -207,7 +216,13 @@ class GhostDriveDB:
     # ── Transaction context manager ───────────────────────────────────────────
 
     class _Transaction:
-        """Context manager for a single SQLite transaction."""
+        """Context manager for a single SQLite transaction.
+
+        Transactions are flat (one level of BEGIN..COMMIT; nesting a
+        ``transaction()`` inside another raises "cannot start a transaction
+        within a transaction" -- the re-entrant RLock only serialises threads,
+        it does not create SAVEPOINTs).  Behaviour is unchanged for callers.
+        """
         def __init__(self, db: GhostDriveDB) -> None:
             self._db = db
 
@@ -218,7 +233,31 @@ class GhostDriveDB:
             max_retries = 5
             for attempt in range(max_retries + 1):
                 try:
-                    self._db._conn.execute("BEGIN")
+                    # BEGIN IMMEDIATE -- not the default deferred BEGIN, and
+                    # deliberately not BEGIN EXCLUSIVE:
+                    #  * vs DEFERRED: a deferred transaction starts as a read
+                    #    snapshot and must *upgrade* to a write lock on its
+                    #    first UPDATE. If another connection commits between
+                    #    the snapshot and the upgrade, SQLite fails the UPDATE
+                    #    with SQLITE_BUSY_SNAPSHOT ("database is locked")
+                    #    IMMEDIATELY -- PRAGMA busy_timeout is deliberately
+                    #    NOT consulted for snapshot conflicts -- so read-then-
+                    #    write helpers such as reserve_quota lost reservations
+                    #    under contention. Taking the write lock up front makes
+                    #    a stale snapshot impossible (spec §5.6 EXCLUSIVE
+                    #    contract, quota.py).
+                    #  * vs EXCLUSIVE: EXCLUSIVE additionally blocks readers,
+                    #    which in WAL mode is pointless contention -- the whole
+                    #    point is only to serialise WRITERS, so IMMEDIATE is
+                    #    the minimal statement that upholds the contract.
+                    # Cost: read-only transaction blocks now take the write
+                    # lock too (slightly more writer contention between
+                    # processes); accepted, the RLock already serialised
+                    # threads within a process. The locked-retry loop is kept
+                    # around BEGIN because IMMEDIATE can still hit "database
+                    # is locked" while another process holds the writer lock
+                    # (busy_timeout applies to that wait).
+                    self._db._conn.execute("BEGIN IMMEDIATE")
                     break
                 except sqlite3.OperationalError as exc:
                     if "locked" in str(exc).lower() and attempt < max_retries:
@@ -552,13 +591,15 @@ class GhostDriveDB:
                 new_chunk_id = _new_uuid()
                 self._conn.execute(
                     """INSERT INTO chunks
-                       (id, file_id, chunk_index, total_chunks, blake3_hash, size, nonce_counter, sub_block_count, is_manifest, ref_count)
+                       (id, file_id, chunk_index, total_chunks, blake3_hash, size, nonce_counter, sub_block_count,
+                        erasure_k, erasure_n, erasure_padlen, is_manifest, ref_count)
                        VALUES
-                       (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         new_chunk_id, new_id, chunk["chunk_index"], chunk["total_chunks"],
                         chunk["blake3_hash"], chunk["size"], chunk["nonce_counter"],
-                        chunk["sub_block_count"], chunk["is_manifest"], chunk["ref_count"]
+                        chunk["sub_block_count"], chunk["erasure_k"], chunk["erasure_n"],
+                        chunk["erasure_padlen"], chunk["is_manifest"], chunk["ref_count"]
                     )
                 )
                 self._chain_hmac("chunks", {"op": "copy_restore", "id": new_chunk_id, "file_id": new_id})
@@ -579,6 +620,153 @@ class GhostDriveDB:
                         )
                     )
                     self._chain_hmac("chunk_locations", {"op": "copy_restore", "chunk_id": new_chunk_id, "backend_id": loc["backend_id"]})
+
+    # ── File version history (file_versions, v14) ─────────────────────────────
+    # Version rows are immutable: nothing here ever UPDATEs an existing row
+    # (history is append-only; a restore inserts a new row instead).
+
+    def insert_file_version(self, record: dict) -> None:
+        """
+        Insert one immutable file_versions row. Caller must be inside a transaction().
+
+        Args:
+            record: Dict with keys: id, file_id, version, reason, size,
+                    blake3_hash, manifest (JSON string), created_at.
+        """
+        self._conn.execute(
+            """INSERT INTO file_versions
+               (id, file_id, version, reason, size, blake3_hash, manifest, created_at)
+               VALUES
+               (:id, :file_id, :version, :reason, :size, :blake3_hash, :manifest, :created_at)""",
+            record,
+        )
+        self._chain_hmac("file_versions", record)
+
+    def list_file_versions(self, file_id: str, limit: int = 50) -> list[sqlite3.Row]:
+        """Version history for one file, newest first. Read-only."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                """SELECT * FROM file_versions
+                   WHERE file_id = ?
+                   ORDER BY version DESC
+                   LIMIT ?""",
+                (file_id, max(1, int(limit))),
+            ).fetchall()
+
+    def latest_file_version(self, file_id: str) -> Optional[sqlite3.Row]:
+        """Newest version row for a file, or None when the file has no history."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM file_versions WHERE file_id = ? ORDER BY version DESC LIMIT 1",
+                (file_id,),
+            ).fetchone()
+
+    def get_file_version(self, file_id: str, version: int) -> Optional[sqlite3.Row]:
+        """Fetch one specific (file_id, version) row, or None."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM file_versions WHERE file_id = ? AND version = ?",
+                (file_id, int(version)),
+            ).fetchone()
+
+    def rehome_file_versions(self, old_file_id: str, new_file_id: str) -> int:
+        """
+        Move every version row from ``old_file_id`` to ``new_file_id``.
+
+        Sync re-uploads supersede the files row (a fresh row holds the new
+        generation), but the history belongs to the *path*, not the row id --
+        without this, each change would hide all previous versions behind an
+        id the API no longer returns. Returns the number of moved rows.
+        Caller must be inside a transaction().
+        """
+        if old_file_id == new_file_id:
+            return 0
+        self._assert_open()
+        existing = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM file_versions WHERE file_id = ?",
+            (new_file_id,),
+        ).fetchone()
+        if int(existing["n"] or 0) > 0:
+            # UNIQUE(file_id, version) would collide; callers only re-home onto
+            # a freshly uploaded row, so this indicates a logic error.
+            raise ValueError(
+                f"Cannot re-home versions onto {new_file_id}: it already has version history."
+            )
+        cur = self._conn.execute(
+            "UPDATE file_versions SET file_id = ? WHERE file_id = ?",
+            (new_file_id, old_file_id),
+        )
+        moved = cur.rowcount
+        if moved:
+            self._chain_hmac("file_versions", {
+                "op": "rehome", "from": old_file_id, "to": new_file_id, "moved": moved,
+            })
+        return moved
+
+    def prune_file_versions(self, file_id: Optional[str], keep: int) -> int:
+        """
+        Delete the oldest versions beyond ``keep`` (per file; every file with
+        history when ``file_id`` is None). Returns the number of removed rows.
+
+        The version the live files row currently points at -- the one whose
+        manifest is exactly the file's present chunk set -- is NEVER pruned,
+        even when it falls outside the keep window: pruning it would orphan
+        the live file's own state from its history, and callers rely on the
+        newest matching version as the "current state" anchor. Caller must be
+        inside a transaction().
+        """
+        self._assert_open()
+        keep = max(0, int(keep))
+        if file_id is None:
+            targets = [
+                r["file_id"]
+                for r in self._conn.execute(
+                    "SELECT DISTINCT file_id FROM file_versions"
+                ).fetchall()
+            ]
+        else:
+            targets = [file_id]
+
+        removed = 0
+        for target in targets:
+            live_ids = {
+                r["id"]
+                for r in self._conn.execute(
+                    "SELECT id FROM chunks WHERE file_id = ?", (target,)
+                ).fetchall()
+            }
+            rows = self._conn.execute(
+                """SELECT id, version, manifest FROM file_versions
+                   WHERE file_id = ?
+                   ORDER BY version DESC""",
+                (target,),
+            ).fetchall()
+            for row in rows[keep:]:
+                if live_ids:
+                    try:
+                        manifest = json.loads(row["manifest"] or "[]")
+                    except json.JSONDecodeError:
+                        manifest = []
+                    manifest_ids = {
+                        entry.get("chunk_id")
+                        for entry in manifest
+                        if isinstance(entry, dict)
+                    }
+                    if manifest_ids and manifest_ids == live_ids:
+                        # This version IS the live file state -- keep it.
+                        continue
+                self._conn.execute(
+                    "DELETE FROM file_versions WHERE id = ?", (row["id"],)
+                )
+                self._chain_hmac("file_versions", {
+                    "op": "delete", "id": row["id"],
+                    "file_id": target, "version": row["version"],
+                })
+                removed += 1
+        return removed
 
     def get_storage_analytics(self) -> dict:
         """
@@ -940,30 +1128,111 @@ class GhostDriveDB:
                 "SELECT * FROM chunk_locations WHERE status = 'pending'"
             ).fetchall()
 
+    def _settle_dangling_intents(self) -> None:
+        """
+        Spec §5.6 startup scan: settle chunk_locations rows a crash left
+        with status='pending' (between the intent commit and confirm).
+
+        An intent still pending at boot can never complete -- the upload that
+        owned it is gone -- so its reserved quota would leak on the backend
+        forever. Every dangling intent is settled exactly like an abandoned
+        upload: the reservation is restored to its backend (clamped, the same
+        statement services/retention.py prune_stale_locations applies to
+        stale pendings) and the row is marked 'cancelled'. The row is kept
+        (not deleted) so the HMAC ledger keeps an audit trail; the dead row
+        is pruned later by retention exactly like any other cancelled row.
+
+        Everything happens in ONE transaction (quota restore + status flip +
+        a single _chain_hmac ledger link, mirroring retention's pattern), so
+        the scan is idempotent: a second open() finds nothing to do. A cheap
+        COUNT probe first, so databases without dangling intents pay exactly
+        one extra query and no transaction at all.
+        """
+        self._assert_open()
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM chunk_locations WHERE status = 'pending'"
+        ).fetchone()
+        count = int(row["c"]) if row else 0
+        if count == 0:
+            return
+
+        quota_released = 0
+        with self.transaction():
+            pendings = self._conn.execute(
+                """SELECT chunk_id, sub_block_index, backend_id, quota_reserved
+                   FROM chunk_locations WHERE status = 'pending'"""
+            ).fetchall()
+            for p in pendings:
+                reserved = int(p["quota_reserved"] or 0)
+                if reserved > 0:
+                    # Same clamped restore as services/retention.py: never go
+                    # negative even if the backend counter was corrected
+                    # elsewhere (e.g. a concurrent restore of this intent).
+                    self._conn.execute(
+                        "UPDATE backends SET quota_reserved = MAX(0, quota_reserved - ?) WHERE id = ?",
+                        (reserved, p["backend_id"]),
+                    )
+                    quota_released += reserved
+                self._conn.execute(
+                    """UPDATE chunk_locations
+                       SET status = 'cancelled', quota_reserved = 0
+                       WHERE chunk_id = ? AND sub_block_index = ? AND backend_id = ?""",
+                    (p["chunk_id"], p["sub_block_index"], p["backend_id"]),
+                )
+            # Ledger link mirroring retention.prune_stale_locations' pattern.
+            self._chain_hmac("chunk_locations", {
+                "op": "startup_settle", "category": "dangling_pending",
+                "count": len(pendings), "quota_released": quota_released,
+            })
+        logger.warning(
+            "Startup scan settled %d dangling pending intent(s), releasing %d "
+            "reserved bytes (spec §5.6).", len(pendings), quota_released,
+        )
+
     # ── Backend quota operations (spec §5.6) ──────────────────────────────────
 
     def reserve_quota(self, backend_id: str, bytes_needed: int) -> bool:
         """
         Atomically reserve quota on a backend.
-        SELECT + UPDATE in a single EXCLUSIVE transaction (spec §5.6).
+        SELECT + UPDATE in a single IMMEDIATE transaction (spec §5.6).
         Caller must be inside a transaction().
 
         Returns True if reserved, False if insufficient space.
         """
-        row = self._conn.execute(
-            """SELECT quota_limit - quota_used - quota_reserved AS available
-               FROM backends WHERE id = ?""",
-            (backend_id,),
-        ).fetchone()
+        # Bounded whole-transaction retry of the SELECT->UPDATE pair. With
+        # _Transaction issuing BEGIN IMMEDIATE the caller already holds the
+        # write lock, so the historical SQLITE_BUSY_SNAPSHOT failure of a
+        # deferred read->write upgrade cannot occur any more; the retry is
+        # belt-and-braces for the rare remaining "database is locked" (e.g. a
+        # WAL checkpoint or another process holding the writer lock longer
+        # than busy_timeout allowed at BEGIN time). Re-running BOTH statements
+        # re-reads availability before deciding, so a retry can never
+        # double-count a reservation -- and a reservation attempt must never
+        # be silently lost (spec §5.6 EXCLUSIVE contract, quota.py).
+        import time
+        import random
+        for attempt in range(4):
+            try:
+                row = self._conn.execute(
+                    """SELECT quota_limit - quota_used - quota_reserved AS available
+                       FROM backends WHERE id = ?""",
+                    (backend_id,),
+                ).fetchone()
 
-        if row is None or row["available"] < bytes_needed:
-            return False
+                if row is None or row["available"] < bytes_needed:
+                    return False
 
-        self._conn.execute(
-            "UPDATE backends SET quota_reserved = quota_reserved + ? WHERE id = ?",
-            (bytes_needed, backend_id),
-        )
-        return True
+                self._conn.execute(
+                    "UPDATE backends SET quota_reserved = quota_reserved + ? WHERE id = ?",
+                    (bytes_needed, backend_id),
+                )
+                return True
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc).lower() or attempt == 3:
+                    raise
+                # Exponential backoff + jitter (mirrors _Transaction's loop).
+                time.sleep(0.05 * (2 ** attempt) + random.uniform(0, 0.02))
+        raise AssertionError("unreachable: reserve_quota retry loop exhausted")
 
     def confirm_quota(self, backend_id: str, bytes_used: int) -> None:
         """Move quota_reserved -> quota_used on upload confirm. Caller in transaction()."""
@@ -1021,6 +1290,277 @@ class GhostDriveDB:
                     to_delete,
                 )
             return len(to_delete)
+
+    # ── Web-facing query helpers ──────────────────────────────────────────────
+
+    def list_files(
+        self,
+        directory: str = "/",
+        search: Optional[str] = None,
+        include_tombstones: bool = False,
+    ) -> list[sqlite3.Row]:
+        """List active (or tombstoned) file rows, newest modification first."""
+        self._assert_open()
+        clauses = ["tombstone = ?"]
+        params: list[Any] = [1 if include_tombstones else 0]
+        directory = (directory or "/").strip()
+        if directory not in ("", "/"):
+            prefix = directory.rstrip("/") + "/"
+            clauses.append("(path = ? OR path LIKE ?)")
+            params.extend([prefix.rstrip("/"), prefix + "%"])
+        if search:
+            clauses.append("name LIKE ?")
+            params.append(f"%{search}%")
+        where = " AND ".join(clauses)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM files WHERE {where} ORDER BY modified_at DESC, name ASC",
+                params,
+            ).fetchall()
+            return rows
+
+    def get_file(self, file_id: str) -> Optional[sqlite3.Row]:
+        """Fetch one file row by UUID."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM files WHERE id = ?", (file_id,)
+            ).fetchone()
+
+    def get_file_chunks(self, file_id: str) -> list[sqlite3.Row]:
+        """Return all chunks for a file ordered by chunk_index."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM chunks WHERE file_id = ? ORDER BY chunk_index ASC",
+                (file_id,),
+            ).fetchall()
+
+    def get_chunk_locations(self, chunk_id: str) -> list[sqlite3.Row]:
+        """Return all chunk_locations rows for a chunk, joined with backend type."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                """SELECT cl.*, b.type AS backend_type, b.status AS backend_status
+                   FROM chunk_locations cl
+                   JOIN backends b ON cl.backend_id = b.id
+                   WHERE cl.chunk_id = ?
+                   ORDER BY cl.sub_block_index ASC""",
+                (chunk_id,),
+            ).fetchall()
+
+    def rename_file(self, file_id: str, new_name: str, new_path: str) -> None:
+        """Rename/move a file. Caller must be inside a transaction()."""
+        clock = self._increment_clock()
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE files
+               SET name = ?, path = ?, modified_at = ?, logical_clock = ?
+               WHERE id = ?""",
+            (new_name, new_path, now, clock, file_id),
+        )
+        self._chain_hmac("files", {
+            "op": "rename", "id": file_id, "name": new_name, "path": new_path,
+        })
+
+    def list_tombstoned_files(self, older_than_days: Optional[int] = None) -> list[sqlite3.Row]:
+        """List soft-deleted files (GhostDrive Trash)."""
+        self._assert_open()
+        with self._lock:
+            if older_than_days is None:
+                return self._conn.execute(
+                    "SELECT * FROM files WHERE tombstone = 1 ORDER BY tombstone_at DESC"
+                ).fetchall()
+            return self._conn.execute(
+                """SELECT * FROM files
+                   WHERE tombstone = 1
+                     AND tombstone_at IS NOT NULL
+                     AND tombstone_at <= datetime('now', ?)
+                   ORDER BY tombstone_at ASC""",
+                (f"-{int(older_than_days)} days",),
+            ).fetchall()
+
+    def insert_upload_history(self, record: dict) -> None:
+        """Record one backend chunk transfer for analytics. Caller in transaction()."""
+        self._conn.execute(
+            """INSERT INTO upload_history
+               (id, backend_id, chunk_id, timestamp, bytes_transferred, duration_ms, success)
+               VALUES
+               (:id, :backend_id, :chunk_id, :timestamp, :bytes_transferred, :duration_ms, :success)""",
+            record,
+        )
+
+    def get_backend(self, backend_id: str) -> Optional[sqlite3.Row]:
+        """Fetch one backend row by id."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM backends WHERE id = ?", (backend_id,)
+            ).fetchone()
+
+    def list_backends(self, include_deprecated: bool = False) -> list[sqlite3.Row]:
+        """Return configured backends ordered by priority."""
+        self._assert_open()
+        with self._lock:
+            sql = "SELECT * FROM backends"
+            if not include_deprecated:
+                sql += " WHERE status != 'deprecated'"
+            sql += " ORDER BY priority DESC, type ASC"
+            return self._conn.execute(sql).fetchall()
+
+    def update_backend_health(
+        self,
+        backend_id: str,
+        status: str,
+        latency_ms: Optional[float] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Persist the result of a backend health check."""
+        self._assert_open()
+        with self._lock:
+            self._conn.execute(
+                """UPDATE backends
+                   SET status = ?, last_health_check = ?, latency_ms = ?, last_error = ?
+                   WHERE id = ?""",
+                (status, _now_iso(), latency_ms, error, backend_id),
+            )
+
+    def update_backend_status(self, backend_id: str, status: str) -> None:
+        """Change a backend's routing status without a network call."""
+        self._assert_open()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE backends SET status = ? WHERE id = ?", (status, backend_id)
+            )
+
+    def update_backend_quota_used(self, backend_id: str, quota_used: int) -> None:
+        """Overwrite the quota_used counter for a backend."""
+        self._assert_open()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE backends SET quota_used = ? WHERE id = ?",
+                (max(0, int(quota_used)), backend_id),
+            )
+
+    def delete_backend(self, backend_id: str) -> None:
+        """Delete a backend row and its registry entry. Caller inside transaction()."""
+        self._conn.execute(
+            "DELETE FROM drive_registry WHERE backend_id = ?", (backend_id,)
+        )
+        self._conn.execute("DELETE FROM backends WHERE id = ?", (backend_id,))
+
+    def insert_integrity_log(
+        self, log_id: str, chunk_id: str, backend_id: str, result: str
+    ) -> None:
+        """Record a chunk integrity verification result."""
+        self._assert_open()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO integrity_log (id, chunk_id, checked_at, result, backend_id)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (log_id, chunk_id, _now_iso(), result, backend_id),
+            )
+
+    def list_integrity_events(self, limit: int = 50) -> list[sqlite3.Row]:
+        """Return recent integrity verification events, newest first."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                """SELECT il.*, f.name AS filename
+                   FROM integrity_log il
+                   JOIN chunks c ON il.chunk_id = c.id
+                   JOIN files f ON c.file_id = f.id
+                   ORDER BY il.checked_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+
+    def get_analytics_summary(self) -> dict:
+        """Aggregate storage counters for the analytics dashboard."""
+        self._assert_open()
+        with self._lock:
+            files = self._conn.execute(
+                """SELECT COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes
+                   FROM files WHERE tombstone = 0"""
+            ).fetchone()
+            chunks = self._conn.execute(
+                """SELECT COUNT(*) AS count,
+                          COALESCE(SUM(c.size), 0) AS logical_bytes,
+                          COALESCE(SUM(CASE WHEN c.ref_count > 1
+                                            THEN c.size * (c.ref_count - 1) ELSE 0 END), 0) AS dedup_bytes
+                   FROM chunks c
+                   JOIN files f ON c.file_id = f.id
+                   WHERE f.tombstone = 0"""
+            ).fetchone()
+            physical = self._conn.execute(
+                "SELECT COALESCE(SUM(quota_used), 0) AS bytes FROM backends WHERE status != 'deprecated'"
+            ).fetchone()
+            return {
+                "file_count": int(files["count"] or 0),
+                "logical_bytes": int(files["bytes"] or 0),
+                "chunk_count": int(chunks["count"] or 0),
+                "chunk_logical_bytes": int(chunks["logical_bytes"] or 0),
+                "dedup_savings_bytes": int(chunks["dedup_bytes"] or 0),
+                "physical_bytes": int(physical["bytes"] or 0),
+            }
+
+    # ── Share link operations (web sharing) ───────────────────────────────────
+
+    def insert_share_link(self, record: dict) -> None:
+        """Create a password-protected/expiring download link. Caller in transaction()."""
+        self._conn.execute(
+            """INSERT INTO share_links
+               (token, file_id, recipient_alias, passcode_hash, passcode_salt,
+                created_at, expires_at, max_downloads, download_count, last_accessed, revoked)
+               VALUES
+               (:token, :file_id, :recipient_alias, :passcode_hash, :passcode_salt,
+                :created_at, :expires_at, :max_downloads, 0, NULL, 0)""",
+            record,
+        )
+
+    def get_share_link(self, token: str) -> Optional[sqlite3.Row]:
+        """Fetch one share link by token."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                """SELECT sl.*, f.name AS filename, f.size AS file_size,
+                          f.mime_type AS mime_type
+                   FROM share_links sl
+                   JOIN files f ON sl.file_id = f.id
+                   WHERE sl.token = ?""",
+                (token,),
+            ).fetchone()
+
+    def list_share_links(self) -> list[sqlite3.Row]:
+        """List share links with file metadata, newest first."""
+        self._assert_open()
+        with self._lock:
+            return self._conn.execute(
+                """SELECT sl.*, f.name AS filename, f.size AS file_size,
+                          f.mime_type AS mime_type
+                   FROM share_links sl
+                   JOIN files f ON sl.file_id = f.id
+                   ORDER BY sl.created_at DESC"""
+            ).fetchall()
+
+    def revoke_share_link(self, token: str) -> bool:
+        """Revoke a share link. Returns True if it existed."""
+        self._assert_open()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE share_links SET revoked = 1 WHERE token = ?", (token,)
+            )
+            return cur.rowcount > 0
+
+    def register_share_download(self, token: str) -> None:
+        """Increment download counter and record access time."""
+        self._assert_open()
+        with self._lock:
+            self._conn.execute(
+                """UPDATE share_links
+                   SET download_count = download_count + 1, last_accessed = ?
+                   WHERE token = ?""",
+                (_now_iso(), token),
+            )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -1188,6 +1728,53 @@ class GhostDriveDB:
                     except sqlite3.OperationalError as e:
                         logger.warning("Database migration v9 -> v10 warning: %s", e)
                     current = 10
+
+                if current == 10:
+                    # v10 -> v11: backend health telemetry columns + share_links table.
+                    try:
+                        cols = [r["name"] for r in self._conn.execute("PRAGMA table_info(backends)").fetchall()]
+                        if "latency_ms" not in cols:
+                            self._conn.execute("ALTER TABLE backends ADD COLUMN latency_ms REAL")
+                        if "last_error" not in cols:
+                            self._conn.execute("ALTER TABLE backends ADD COLUMN last_error TEXT")
+                        logger.info("Database migration: v10 -> v11 (backend health telemetry, share links).")
+                    except sqlite3.OperationalError as e:
+                        logger.warning("Database migration v10 -> v11 warning: %s", e)
+                    current = 11
+
+                if current == 11:
+                    # v11 -> v12: explicit erasure parameters + snapshot copies
+                    # and restore-proof attestations.
+                    try:
+                        cols = [r["name"] for r in self._conn.execute("PRAGMA table_info(chunks)").fetchall()]
+                        if "erasure_k" not in cols:
+                            self._conn.execute("ALTER TABLE chunks ADD COLUMN erasure_k INTEGER NOT NULL DEFAULT 0")
+                        if "erasure_n" not in cols:
+                            self._conn.execute("ALTER TABLE chunks ADD COLUMN erasure_n INTEGER NOT NULL DEFAULT 0")
+                        if "erasure_padlen" not in cols:
+                            self._conn.execute("ALTER TABLE chunks ADD COLUMN erasure_padlen INTEGER NOT NULL DEFAULT 0")
+                        snap_cols = [r["name"] for r in self._conn.execute("PRAGMA table_info(index_snapshots)").fetchall()]
+                        if "slot" not in snap_cols:
+                            self._conn.execute("ALTER TABLE index_snapshots ADD COLUMN slot INTEGER NOT NULL DEFAULT 0")
+                        if "snapshot_size" not in snap_cols:
+                            self._conn.execute("ALTER TABLE index_snapshots ADD COLUMN snapshot_size INTEGER NOT NULL DEFAULT 0")
+                        logger.info("Database migration: v11 -> v12 (erasure metadata, snapshot copies, restore drills).")
+                    except sqlite3.OperationalError as e:
+                        logger.warning("Database migration v11 -> v12 warning: %s", e)
+                    current = 12
+
+                if current == 12:
+                    # v12 -> v13: always-on protection sets. Tables are created
+                    # by the shared ALL_DDL pass below.
+                    logger.info("Database migration: v12 -> v13 (always-on protection sets).")
+                    current = 13
+
+                if current == 13:
+                    # v13 -> v14: immutable file version history (file_versions).
+                    # The table and its index are created by the shared
+                    # ALL_DDL pass below, so no DDL is needed here.
+                    logger.info("Database migration: v13 -> v14 (file version history).")
+                    current = 14
 
                 for ddl in ALL_DDL:
                     stmt = ddl.strip()

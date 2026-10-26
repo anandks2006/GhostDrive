@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     size            INTEGER NOT NULL,       -- original chunk bytes pre-compression
     nonce_counter   INTEGER NOT NULL,       -- monotonic counter -> 96-bit nonce
     sub_block_count INTEGER NOT NULL DEFAULT 1,
+    erasure_k       INTEGER NOT NULL DEFAULT 0,  -- data shards (0 = legacy/infer)
+    erasure_n       INTEGER NOT NULL DEFAULT 0,  -- total shards (0 = legacy/infer)
+    erasure_padlen  INTEGER NOT NULL DEFAULT 0,  -- zfec padding bytes
     is_manifest     INTEGER NOT NULL DEFAULT 0,  -- 0|1 bool
     ref_count       INTEGER NOT NULL DEFAULT 1,  -- >= 1 while referenced
     UNIQUE(file_id, chunk_index)
@@ -82,6 +85,8 @@ CREATE TABLE IF NOT EXISTS backends (
     quota_reserved    INTEGER NOT NULL DEFAULT 0,
     ml_artifacts_only INTEGER NOT NULL DEFAULT 0,  -- 0|1 bool
     cpu_intensive     INTEGER NOT NULL DEFAULT 0,  -- 0|1 bool
+    latency_ms        REAL,                 -- last health-check round trip
+    last_error        TEXT,                 -- last health-check error (NULL if healthy)
     deprecated_at     TEXT                  -- ISO-8601, NULL if not deprecated
 ) STRICT;
 """
@@ -146,7 +151,43 @@ CREATE TABLE IF NOT EXISTS index_snapshots (
     snapshot_at      TEXT NOT NULL,         -- ISO-8601
     blake3_hash      TEXT NOT NULL,         -- hex BLAKE3 of snapshot file
     hash_backend_id  TEXT NOT NULL REFERENCES backends(id),  -- DIFFERENT backend from snapshot file
-    wal_checkpointed INTEGER NOT NULL DEFAULT 0  -- 0|1 bool
+    wal_checkpointed INTEGER NOT NULL DEFAULT 0,  -- 0|1 bool
+    slot             INTEGER NOT NULL DEFAULT 0,  -- rotating slot 0..2
+    snapshot_size    INTEGER NOT NULL DEFAULT 0
+) STRICT;
+"""
+
+CREATE_INDEX_SNAPSHOT_COPIES = """
+CREATE TABLE IF NOT EXISTS index_snapshot_copies (
+    snapshot_id     TEXT NOT NULL REFERENCES index_snapshots(id),
+    backend_id      TEXT NOT NULL REFERENCES backends(id),
+    domain_id       TEXT NOT NULL,
+    reference_id    TEXT NOT NULL,
+    blake3_hash     TEXT NOT NULL,
+    size            INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'confirmed'
+                    CHECK(status IN ('pending','confirmed','failed')),
+    created_at      TEXT NOT NULL,
+    verified_at     TEXT,
+    PRIMARY KEY (snapshot_id, backend_id)
+) STRICT;
+"""
+
+CREATE_RESTORE_DRILLS = """
+CREATE TABLE IF NOT EXISTS restore_drills (
+    id             TEXT PRIMARY KEY,      -- UUIDv4
+    started_at     TEXT NOT NULL,         -- ISO-8601
+    completed_at   TEXT,                  -- ISO-8601
+    snapshot_id    TEXT REFERENCES index_snapshots(id),
+    file_id        TEXT REFERENCES files(id),
+    chunk_id       TEXT REFERENCES chunks(id),
+    shards_used    INTEGER NOT NULL DEFAULT 0,
+    domains_used   INTEGER NOT NULL DEFAULT 0,
+    bytes_restored INTEGER NOT NULL DEFAULT 0,
+    duration_ms    INTEGER NOT NULL DEFAULT 0,
+    result         TEXT NOT NULL DEFAULT 'running'
+                   CHECK(result IN ('running','passed','failed','skipped')),
+    detail         TEXT NOT NULL DEFAULT ''
 ) STRICT;
 """
 
@@ -279,6 +320,12 @@ CREATE INDEX IF NOT EXISTS idx_drive_registry_uuid ON drive_registry(drive_uuid)
 CREATE INDEX IF NOT EXISTS idx_smart_history_be   ON smart_history(backend_id, checked_at);
 CREATE INDEX IF NOT EXISTS idx_tier_patterns_path ON tier_patterns(path_pattern);
 CREATE INDEX IF NOT EXISTS idx_destops_session    ON destructive_ops_log(session_id, initiated_at);
+CREATE INDEX IF NOT EXISTS idx_share_links_file   ON share_links(file_id);
+CREATE INDEX IF NOT EXISTS idx_files_name         ON files(name);
+CREATE INDEX IF NOT EXISTS idx_snapshot_copies_snap ON index_snapshot_copies(snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_restore_drills_done  ON restore_drills(completed_at);
+CREATE INDEX IF NOT EXISTS idx_protection_files_set ON protection_set_files(set_id, status);
+CREATE INDEX IF NOT EXISTS idx_file_versions_file  ON file_versions(file_id, version DESC);
 """
 
 # ─── New tables: Ledger Entries (v5) ──────────────────────────────────────────
@@ -349,6 +396,98 @@ CREATE TABLE IF NOT EXISTS settings (
 ) STRICT;
 """
 
+# ─── Always-on protection sets (v13) ─────────────────────────────────────────
+# A protection set mirrors a local folder into the encrypted vault. The watcher
+# re-scans enabled sets and uploads new or changed files with the chosen tier.
+
+CREATE_PROTECTION_SETS = """
+CREATE TABLE IF NOT EXISTS protection_sets (
+    id               TEXT PRIMARY KEY,        -- UUIDv4
+    name             TEXT NOT NULL,
+    source_path      TEXT NOT NULL,           -- absolute local folder
+    destination_path TEXT NOT NULL DEFAULT '/',
+    tier             TEXT NOT NULL DEFAULT 'IMPORTANT'
+                     CHECK(tier IN ('CRITICAL','IMPORTANT','DISPOSABLE')),
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL,           -- ISO-8601
+    updated_at       TEXT NOT NULL,           -- ISO-8601
+    last_scan_at     TEXT,
+    last_sync_at     TEXT,
+    last_error       TEXT,
+    file_count       INTEGER NOT NULL DEFAULT 0,
+    total_bytes      INTEGER NOT NULL DEFAULT 0
+) STRICT;
+"""
+
+CREATE_PROTECTION_SET_FILES = """
+CREATE TABLE IF NOT EXISTS protection_set_files (
+    set_id        TEXT NOT NULL REFERENCES protection_sets(id) ON DELETE CASCADE,
+    relative_path TEXT NOT NULL,              -- POSIX path under source_path
+    source_size   INTEGER NOT NULL,
+    source_mtime  INTEGER NOT NULL,           -- nanoseconds
+    file_id       TEXT REFERENCES files(id),
+    status        TEXT NOT NULL DEFAULT 'pending'
+                  CHECK(status IN ('pending','uploaded','failed','missing')),
+    last_seen_at  TEXT NOT NULL,              -- ISO-8601
+    last_synced_at TEXT,
+    error         TEXT,
+    PRIMARY KEY (set_id, relative_path)
+) STRICT;
+"""
+
+# ─── New table: Web share links (v11) ─────────────────────────────────────────
+# Password-protected, expiring download links served by the local web app.
+# The passcode is stored as PBKDF2-HMAC-SHA256(salt, passcode) -- never plaintext.
+
+CREATE_SHARE_LINKS = """
+CREATE TABLE IF NOT EXISTS share_links (
+    token           TEXT PRIMARY KEY,        -- URL-safe random token
+    file_id         TEXT NOT NULL REFERENCES files(id),
+    recipient_alias TEXT NOT NULL DEFAULT 'public',
+    passcode_hash   TEXT,                    -- hex PBKDF2 hash, NULL = no passcode
+    passcode_salt   TEXT,                    -- hex random salt, NULL = no passcode
+    created_at      TEXT NOT NULL,           -- ISO-8601
+    expires_at      TEXT,                    -- ISO-8601, NULL = never
+    max_downloads   INTEGER,                 -- NULL = unlimited
+    download_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed   TEXT,                    -- ISO-8601
+    revoked         INTEGER NOT NULL DEFAULT 0
+) STRICT;
+"""
+
+# ─── New table: File version history (v14) ───────────────────────────────────
+# Point-in-time restore (ransomware resilience). Every row is an IMMUTABLE
+# snapshot of one file's ordered chunk manifest at a moment in time; history
+# is append-only (a restore records a NEW row with reason='restore').
+#
+# Why versions are cheap: a version row points at chunks by id instead of
+# copying them. Chunks are content-addressed (BLAKE3) and ref-counted, so a
+# version costs a few hundred bytes of metadata and NEVER duplicates
+# ciphertext. If a version's chunks are later garbage-collected, restore
+# fails loudly ("chunk N no longer available -- pruned") instead of returning
+# corrupt data.
+#
+# ON DELETE CASCADE: purge_file_permanently() deletes files rows (Trash
+# retention). Without the cascade, leftover version rows would make that
+# DELETE fail on the foreign key and wedge empty_trash; with it, permanently
+# purging a file also drops the history that could only ever reference its
+# now-deleted chunks.
+
+CREATE_FILE_VERSIONS = """
+CREATE TABLE IF NOT EXISTS file_versions (
+    id            TEXT PRIMARY KEY,       -- UUIDv4
+    file_id       TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    version       INTEGER NOT NULL,       -- 1-based, monotonically increasing per file_id
+    reason        TEXT NOT NULL DEFAULT 'sync'
+                  CHECK(reason IN ('sync','manual','restore','import')),
+    size          INTEGER NOT NULL,
+    blake3_hash   TEXT NOT NULL,          -- derived digest of the whole chunk set (see services/versions.py)
+    manifest      TEXT NOT NULL,          -- JSON: [{"chunk_id":..., "size":...}, ...] ordered
+    created_at    TEXT NOT NULL,          -- ISO-8601
+    UNIQUE(file_id, version)
+) STRICT;
+"""
+
 # ─── Convenience list of all DDL statements (applied in order) ────────────────
 
 ALL_DDL: list[str] = [
@@ -361,6 +500,8 @@ ALL_DDL: list[str] = [
     CREATE_SHARES,
     CREATE_SHARING_AUDIT_LOG,
     CREATE_INDEX_SNAPSHOTS,
+    CREATE_INDEX_SNAPSHOT_COPIES,
+    CREATE_RESTORE_DRILLS,
     CREATE_INTEGRITY_LOG,
     CREATE_HMAC_LEDGER,
     CREATE_LEDGER_ENTRIES,
@@ -375,12 +516,16 @@ ALL_DDL: list[str] = [
     CREATE_FTS_TRIGGER_DELETE,
     CREATE_FTS_TRIGGER_UPDATE,
     CREATE_SETTINGS,
+    CREATE_SHARE_LINKS,
+    CREATE_PROTECTION_SETS,
+    CREATE_PROTECTION_SET_FILES,
+    CREATE_FILE_VERSIONS,    # v14: immutable per-file version history
     *CREATE_INDEXES.strip().split(";\n"),   # one statement per index
 ]
 
 # ─── Schema version (for future migrations) ───────────────────────────────────
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 14
 
 CREATE_SCHEMA_VERSION = """
 CREATE TABLE IF NOT EXISTS schema_version (

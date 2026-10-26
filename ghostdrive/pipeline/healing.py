@@ -7,23 +7,43 @@ import logging
 from datetime import datetime, timezone
 import uuid
 
-from PyQt6.QtCore import QObject, pyqtSignal
-
 from ghostdrive.database.db import GhostDriveDB
 from ghostdrive.crypto.nonce import NonceManager
 from ghostdrive.crypto.chunk_crypto import ChunkDecryptor
 from ghostdrive.crypto.hkdf import derive_chunk_key
 from ghostdrive.exceptions import AuthenticationError
+from ghostdrive.pipeline.coding import erasure_parameters
 from ghostdrive.pipeline.quota import QuotaManager
+from ghostdrive.services import maintenance_window
 
 logger = logging.getLogger("ghostdrive.healing")
 
 SUB_BLOCK_BYTES = 50 * 1024 * 1024  # 50 MB standard sub-block size
 
-class DaemonSignals(QObject):
-    refresh_backends = pyqtSignal()
-    refresh_files = pyqtSignal()
-    trigger_health_alert = pyqtSignal(int)
+class _Signal:
+    """Minimal Qt-compatible signal (connect/emit) used by the web app."""
+
+    def __init__(self) -> None:
+        self._callbacks: list = []
+
+    def connect(self, callback) -> None:
+        self._callbacks.append(callback)
+
+    def emit(self, *args) -> None:
+        for callback in list(self._callbacks):
+            try:
+                callback(*args)
+            except Exception as exc:  # pragma: no cover - defensive UI callback guard
+                logger.warning("Signal callback failed: %s", exc)
+
+
+class DaemonSignals:
+    """Dependency-free replacement for the former PyQt6 signal container."""
+
+    def __init__(self) -> None:
+        self.refresh_backends = _Signal()
+        self.refresh_files = _Signal()
+        self.trigger_health_alert = _Signal()
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -39,8 +59,15 @@ async def verify_chunk_location(
     active_backends: dict
 ) -> str:
     """
-    Downloads and decrypts all sub-blocks of a chunk sequentially in index order,
-    and verifies the Poly1305 MAC tag only against the end of the completed logical chunk stream.
+    Verify that the stored object of ONE specific chunk_location record is
+    intact, by reconstructing the logical chunk ciphertext (erasure) or the
+    sub-block stream (replicated) and checking the Poly1305 MAC tag.
+
+    For erasure-coded chunks the location's OWN shard must be fetched from
+    its own backend and must participate in the Reed-Solomon decode, so a
+    denied or corrupted shard is always attributed to the backend that holds
+    it -- never masked by peers.  Returns "ok" | "not_found" | "auth_failed"
+    | "error" (transient).
     """
     chunk_id = loc["chunk_id"]
     backend_id = loc["backend_id"]
@@ -60,15 +87,52 @@ async def verify_chunk_location(
 
     # Get chunk metadata
     with db.transaction():
-        c_row = db._conn.execute("SELECT sub_block_count, nonce_counter FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+        c_row = db._conn.execute(
+            "SELECT sub_block_count, erasure_k, erasure_n, erasure_padlen, nonce_counter FROM chunks WHERE id = ?",
+            (chunk_id,),
+        ).fetchone()
     if not c_row:
         return "not_found"
     
     sub_block_count = c_row["sub_block_count"]
     nonce_counter = c_row["nonce_counter"]
+    k, n, padlen, is_erasure = erasure_parameters(c_row)
 
-    if sub_block_count >= 6:
-        # Erasure coding verification
+    if is_erasure:
+        # ---- Erasure verification of ONE SPECIFIC location record ----------
+        # The record under verification is (chunk_id, sub_block_index,
+        # backend_id) on THIS backend, so the verdict must be derived from
+        # THIS backend's own bytes.  The old implementation gathered "any k
+        # shards in index order" and stopped, which had two blind spots:
+        #   * a backend that 404s its shard was silently masked by its peers
+        #     and verified 'ok', so hostility.detect_withholding never
+        #     received the per-backend not_found rows it consumes, and
+        #   * shards beyond the first k (parity shards) were never downloaded
+        #     at all, so a byte-flipped parity shard also verified 'ok'.
+        # The fix: fetch the TARGET shard from its own backend FIRST (any
+        # download failure is attributed to that backend), then k-1 peer
+        # shards, and force the target's bytes to participate in the zfec
+        # decode -- a corrupted target then breaks the Poly1305 check of the
+        # reconstructed chunk.  A healthy target still downloads exactly k
+        # shards (itself + k-1 peers): no full-chunk re-download, and the
+        # decode/decrypt/auth steps below are unchanged.
+        target_idx = int(loc["sub_block_index"])
+        target_backend_id = loc["backend_id"]
+        target_backend_type = (
+            loc["backend_type"] if "backend_type" in loc.keys() else None
+        )
+
+        # `rows` above is already filtered to this backend + confirmed; the
+        # exact location being verified must be among them or it is gone.
+        if not any(
+            int(r["sub_block_index"]) == target_idx
+            and r["backend_id"] == target_backend_id
+            for r in rows
+        ):
+            return "not_found"
+
+        # All confirmed shard rows of the chunk (peers may live on other
+        # backends -- that is the point of erasure coding).
         with db.transaction():
             all_rows = db._conn.execute(
                 """SELECT cl.*, b.type as backend_type FROM chunk_locations cl
@@ -77,20 +141,65 @@ async def verify_chunk_location(
                    ORDER BY cl.sub_block_index ASC""",
                 (chunk_id,)
             ).fetchall()
-        
+
         shards_by_idx = {}
         for r in all_rows:
             if r["sub_block_index"] not in shards_by_idx:
                 shards_by_idx[r["sub_block_index"]] = r
-                
-        if len(shards_by_idx) < 4:
+
+        if len(shards_by_idx) < k:
             return "not_found"
-            
+
+        async def _fetch_all(reference_id, b_obj):
+            blocks_list = []
+            async for block in b_obj.download(reference_id):
+                blocks_list.append(block)
+            return b"".join(blocks_list)
+
         try:
             downloaded = {}
+
+            # 1) THE TARGET shard, from the backend that is being verified.
+            target_obj = (
+                active_backends.get(target_backend_id)
+                or active_backends.get(target_backend_type)
+            )
+            if not target_obj:
+                # The location under verification cannot be read at all.
+                return "not_found"
+            if not getattr(target_obj, "_connected", False):
+                await target_obj.connect()
+                target_obj._connected = True
+            try:
+                target_bytes = await _fetch_all(loc["reference_id"], target_obj)
+            except Exception as exc:
+                # Attribute the failure to the backend under verification
+                # (peers must not mask it). Missing-object errors mean THIS
+                # location is gone -> not_found; anything else is a transient
+                # network error -> 'error', which does not fail the location
+                # (same classification as the replicated branch below).
+                exc_str = str(exc).lower()
+                if "not found" in exc_str or "404" in exc_str or "does not exist" in exc_str:
+                    logger.error(
+                        "Chunk %s shard %d not found on backend %s: %s",
+                        chunk_id[:8], target_idx, target_backend_id[:8], exc,
+                    )
+                    return "not_found"
+                logger.warning(
+                    "Transient error fetching shard %d of chunk %s from %s: %s",
+                    target_idx, chunk_id[:8], target_backend_id[:8], exc,
+                )
+                return "error"
+            if not target_bytes:
+                return "not_found"
+            downloaded[target_idx] = target_bytes
+
+            # 2) k-1 peer shards from OTHER sub-block indexes (any backend).
             for sub_idx, loc_row in sorted(shards_by_idx.items()):
-                if len(downloaded) >= 4:
+                if len(downloaded) >= k:
                     break
+                if sub_idx == target_idx:
+                    continue
                 try:
                     b_obj = active_backends.get(loc_row["backend_id"]) or active_backends.get(loc_row["backend_type"])
                     if not b_obj:
@@ -98,28 +207,31 @@ async def verify_chunk_location(
                     if not getattr(b_obj, "_connected", False):
                         await b_obj.connect()
                         b_obj._connected = True
-                        
-                    blocks_list = []
-                    async for block in b_obj.download(loc_row["reference_id"]):
-                        blocks_list.append(block)
-                    if blocks_list:
-                        downloaded[sub_idx] = b"".join(blocks_list)
+                    peer_bytes = await _fetch_all(loc_row["reference_id"], b_obj)
+                    if peer_bytes:
+                        downloaded[sub_idx] = peer_bytes
                 except Exception as e:
                     logger.warning("Failed to download shard index %d: %s", sub_idx, e)
-                    
-            if len(downloaded) < 4:
+
+            if len(downloaded) < k:
                 return "not_found"
-                
-            padlen = (sub_block_count - 6) // 10
-            blocks = []
-            sharenums = []
+
+            # Reconstruct with the TARGET shard FORCED into the k-set: a
+            # target whose index sorts after the first k peers must never be
+            # dropped from the decode inputs, or its corruption would stay
+            # invisible (that was the original parity-shard blind spot).
+            blocks = [downloaded[target_idx]]
+            sharenums = [target_idx]
             for sub_idx in sorted(downloaded.keys()):
-                if len(blocks) < 4:
-                    blocks.append(downloaded[sub_idx])
-                    sharenums.append(sub_idx)
-                    
+                if sub_idx == target_idx:
+                    continue
+                blocks.append(downloaded[sub_idx])
+                sharenums.append(sub_idx)
+                if len(blocks) >= k:
+                    break
+
             from zfec.easyfec import Decoder
-            dec = Decoder(4, 6)
+            dec = Decoder(k, n)
             chunk_ciphertext = dec.decode(blocks, sharenums, padlen)
             
             if len(chunk_ciphertext) < 16:
@@ -484,6 +596,8 @@ class HealingQueue:
         self._upload_active = False
         # Set of backend_ids that are currently targets of an active healing upload
         self._active_healing_backends = set()
+        # Counts consecutive repair-window skips so we can throttle the debug log.
+        self._window_skip_count = 0
         self.signals = DaemonSignals()
 
     def start(self) -> None:
@@ -509,7 +623,21 @@ class HealingQueue:
                 if ChunkUploader.active_uploads > 0 or getattr(self.main_view, "active_uploads", 0) > 0 or self._upload_active:
                     logger.info("Healing trickle paused: foreground uploads active.")
                 else:
-                    await self.perform_healing_step()
+                    # 2. Maintenance-window gate: only trickle repairs when the
+                    # configured repair window allows it (disabled = always).
+                    allowed, reason = maintenance_window.is_repair_allowed(self.db)
+                    if allowed:
+                        self._window_skip_count = 0
+                        await self.perform_healing_step()
+                    else:
+                        # Throttled debug log: a closed window persists for hours
+                        # and must not spam the log every loop_interval.
+                        self._window_skip_count += 1
+                        if self._window_skip_count == 1 or self._window_skip_count % 60 == 0:
+                            logger.debug(
+                                "Healing trickle skipped: %s (skip #%d)",
+                                reason, self._window_skip_count,
+                            )
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -581,9 +709,13 @@ class HealingQueue:
                     (chunk_id,)
                 ).fetchall()
 
-                # Get backends already having a confirmed or pending location
+                # Get backends already having a confirmed or pending location.
+                # A failed/cancelled row must NOT exclude its backend: retrying
+                # that backend is exactly how healing recovers from a failure,
+                # and retention prunes dead rows later.
                 excl_backends = self.db._conn.execute(
-                    "SELECT backend_id FROM chunk_locations WHERE chunk_id = ?",
+                    """SELECT backend_id FROM chunk_locations
+                       WHERE chunk_id = ? AND status IN ('confirmed', 'pending')""",
                     (chunk_id,)
                 ).fetchall()
                 excl_ids = [e["backend_id"] for e in excl_backends]
@@ -614,7 +746,9 @@ class HealingQueue:
             
             self._active_healing_backends.add(target_backend[0])
             try:
-                await self._heal_chunk_record(chunk_id, row["size"], row["nonce_counter"], source_loc, target_backend)
+                # Respect the repair bandwidth cap while data actually moves.
+                async with maintenance_window.background_bandwidth_scope(self.db):
+                    await self._heal_chunk_record(chunk_id, row["size"], row["nonce_counter"], source_loc, target_backend)
                 # Success notification
                 if hasattr(self.main_view, "notifications"):
                     self.main_view.notifications.notify(
@@ -742,11 +876,20 @@ class HealingQueue:
             
             for idx in range(sub_block_count):
                 sub_quota = size if idx == 0 else 0
+                # Upsert, not plain INSERT: a previously failed/cancelled row on
+                # this (chunk, sub_block_index, backend) is still present — the
+                # candidate query now allows healing back to that backend, so
+                # we must overwrite the dead row instead of tripping the PK.
                 self.db._conn.execute(
                     """INSERT INTO chunk_locations
                        (chunk_id, sub_block_index, backend_id, reference_id, url_type,
                         upload_date, status, quota_reserved)
-                       VALUES (?, ?, ?, '', 'permanent', ?, 'pending', ?)""",
+                       VALUES (?, ?, ?, '', 'permanent', ?, 'pending', ?)
+                       ON CONFLICT(chunk_id, sub_block_index, backend_id) DO UPDATE SET
+                          reference_id = '', url_type = 'permanent',
+                          upload_date = excluded.upload_date,
+                          last_verified = NULL, status = 'pending',
+                          quota_reserved = excluded.quota_reserved""",
                     (chunk_id, idx, target_id, _now_iso(), sub_quota)
                 )
 

@@ -6,6 +6,10 @@ def get_app_data_dir() -> Path:
 
     Guarantees the directory exists before returning.
     """
-    path = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / ".ghostdrive"
+    override = os.environ.get("GHOSTDRIVE_DATA_DIR")
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        path = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / ".ghostdrive"
     path.mkdir(parents=True, exist_ok=True)
     return path

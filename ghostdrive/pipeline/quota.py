@@ -4,8 +4,9 @@ quota.py -- Atomic quota reservation for the upload pipeline (spec §5.6).
 Two-phase commit quota flow
 ============================
 1. reserve(backend_id, bytes) -- called BEFORE upload starts.
-   SELECT + UPDATE in a single EXCLUSIVE transaction.
-   Prevents two concurrent uploads double-spending the same quota.
+   SELECT + UPDATE in a single IMMEDIATE (write-lock) transaction
+   (BEGIN IMMEDIATE in GhostDriveDB._Transaction). Prevents two
+   concurrent uploads double-spending the same quota.
 
 2. confirm(backend_id, bytes) -- called AFTER upload succeeds.
    Moves quota_reserved -> quota_used.
