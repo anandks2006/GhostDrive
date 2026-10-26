@@ -97,7 +97,10 @@
             <div id="unlock-error" class="form-error hidden"></div>
             <button id="btn-unlock" class="btn btn-primary btn-block" type="submit">Unlock vault</button>
           </form>
-          <div class="auth-links"><button class="link-button" id="link-restore" type="button">Restore from recovery phrase</button></div>
+          <div class="auth-links">
+            <button class="link-button" id="link-restore" type="button">Restore from recovery phrase</button>
+            <button class="link-button auth-link-danger" id="link-factory-reset" type="button">Forgot your passphrase? Factory reset</button>
+          </div>
         </div>
 
         <div id="setup-form" class="auth-form hidden">
@@ -864,6 +867,32 @@
       <div class="modal-head"><div><span class="eyebrow">Confirm</span><h2 id="confirm-title">Are you sure?</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
       <p id="confirm-message" class="muted"></p>
       <div class="modal-actions"><button class="btn btn-secondary" data-close-modal type="button">Cancel</button><button class="btn btn-danger" id="btn-confirm-action" type="button">Continue</button></div>
+    </div>
+  </div>
+
+  <div id="factory-reset-modal" class="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel modal-small" role="dialog" aria-modal="true" aria-labelledby="factory-reset-title">
+      <div class="modal-head"><div><span class="eyebrow">Irreversible</span><h2 id="factory-reset-title">Factory reset</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <div class="notice danger-notice">
+        <strong>This erases your vault permanently.</strong>
+        <ul>
+          <li>Master key, keystore, and encrypted index are deleted.</li>
+          <li>All locally stored file ciphertext is deleted.</li>
+          <li>Backend credentials are removed from the OS keyring.</li>
+          <li>Files stored on remote backends become permanently unrecoverable.</li>
+        </ul>
+        <span>There is no undo. If you have your recovery phrase, use “Restore from recovery phrase” instead.</span>
+      </div>
+      <label class="field">
+        <span>Type <code>ERASE EVERYTHING</code> to confirm</span>
+        <input id="factory-reset-confirm-input" type="text" autocomplete="off" spellcheck="false" placeholder="ERASE EVERYTHING">
+      </label>
+      <div id="factory-reset-error" class="form-error hidden"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" data-close-modal type="button">Cancel</button>
+        <button class="btn btn-danger" id="btn-factory-reset-execute" type="button" disabled>Erase everything</button>
+      </div>
     </div>
   </div>
 

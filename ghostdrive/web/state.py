@@ -15,6 +15,19 @@ from ghostdrive.utils.platform import get_app_data_dir
 
 logger = logging.getLogger("ghostdrive_web")
 
+#: Factory-default preferences. Used at construction and reset to by
+#: services.factory_reset so a wiped vault cannot leak stale settings.
+DEFAULT_SETTINGS: Dict[str, Any] = {
+    "theme": "dark",
+    "accent_color": "#c4f56a",
+    "autostart": False,
+    "desktop_notifications": True,
+    "log_level": "INFO",
+    "proxy_type": "none",
+    "proxy_host": "",
+    "proxy_port": 0,
+}
+
 class GlobalState:
     """Singleton holding initialized active components for the web session."""
     def __init__(self):
@@ -28,16 +41,7 @@ class GlobalState:
         self.telemetry_clients: set = set()
         self.background_tasks: set = set()
         self.scrub_job: Optional[str] = None
-        self.settings: Dict[str, Any] = {
-            "theme": "dark",
-            "accent_color": "#c4f56a",
-            "autostart": False,
-            "desktop_notifications": True,
-            "log_level": "INFO",
-            "proxy_type": "none",
-            "proxy_host": "",
-            "proxy_port": 0,
-        }
+        self.settings: Dict[str, Any] = dict(DEFAULT_SETTINGS)
         self._settings_loaded = False
 
     def load_persisted_settings(self) -> None:

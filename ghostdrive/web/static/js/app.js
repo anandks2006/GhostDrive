@@ -388,6 +388,41 @@
     });
     $("#link-back-unlock").addEventListener("click", () => setAuthView("unlock"));
 
+    // Factory reset: type-to-confirm gate, then POST; on success reload so the
+    // first-run setup screen appears (the keystore no longer exists).
+    const factoryResetInput = $("#factory-reset-confirm-input");
+    const factoryResetExecute = $("#btn-factory-reset-execute");
+    const factoryResetPhrase = "ERASE EVERYTHING";
+    function openFactoryReset() {
+      factoryResetInput.value = "";
+      factoryResetExecute.disabled = true;
+      $("#factory-reset-error").classList.add("hidden");
+      openModal("factory-reset-modal");
+      factoryResetInput.focus();
+    }
+    $("#link-factory-reset").addEventListener("click", openFactoryReset);
+    factoryResetInput.addEventListener("input", () => {
+      factoryResetExecute.disabled = factoryResetInput.value !== factoryResetPhrase;
+    });
+    factoryResetExecute.addEventListener("click", async () => {
+      const errorBox = $("#factory-reset-error");
+      errorBox.classList.add("hidden");
+      try {
+        setBusy(factoryResetExecute, true, "Erasing");
+        const result = await api("/api/auth/factory-reset", {
+          method: "POST",
+          body: { confirm: factoryResetInput.value },
+        });
+        toast(result.message || "Vault erased.");
+        closeModal("factory-reset-modal");
+        window.setTimeout(() => window.location.reload(), 600);
+      } catch (error) {
+        errorBox.textContent = error.message;
+        errorBox.classList.remove("hidden");
+        setBusy(factoryResetExecute, false);
+      }
+    });
+
     $("#btn-copy-seed").addEventListener("click", () => {
       copyText(state.seedPhrase)
         .then(() => toast("Recovery phrase copied."))

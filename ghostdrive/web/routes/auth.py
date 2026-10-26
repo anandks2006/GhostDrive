@@ -12,6 +12,7 @@ from ghostdrive.crypto.credential_store import credential_store
 from ghostdrive.crypto.keystore import KeystoreManager
 from ghostdrive.database.db import GhostDriveDB
 from ghostdrive.crypto.hkdf import derive_index_mac_key
+from ghostdrive.services.factory_reset import CONFIRM_PHRASE, perform_factory_reset
 
 logger = logging.getLogger("ghostdrive_web.auth")
 
@@ -38,6 +39,11 @@ class UnlockRequest(BaseModel):
 
 class ResetDBRequest(BaseModel):
     confirm: bool
+
+class FactoryResetRequest(BaseModel):
+    # Typed confirmation phrase; the UI requires the user to type it out so a
+    # stray click can never erase an unrecoverable vault.
+    confirm: str
 
 def _init_km() -> KeystoreManager:
     if state.km is None:
@@ -166,6 +172,29 @@ def reset_database(req: ResetDBRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"Failed to recreate database: {exc}")
 
     return {"status": "success", "message": "Fresh database created successfully."}
+
+@router.post("/factory-reset")
+def factory_reset(req: FactoryResetRequest) -> dict:
+    """
+    Erase ALL local vault data: keystore, index, local ciphertext, staged
+    updates, and OS keyring entries. Returns the app to first-run setup.
+
+    Deliberately available while locked: a forgotten passphrase cannot decrypt
+    anything anyway, and recovery without the phrase is impossible. Safety
+    comes from the typed confirmation phrase, not from authentication.
+    """
+    if req.confirm.strip() != CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{CONFIRM_PHRASE}' exactly to confirm.",
+        )
+    try:
+        result = perform_factory_reset(state)
+    except Exception as exc:
+        logger.error("Factory reset failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Factory reset failed: {exc}")
+    logger.warning("Factory reset completed via API.")
+    return result
 
 @router.post("/lock")
 def lock_keystore() -> dict:
