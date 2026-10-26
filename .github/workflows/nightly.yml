@@ -1,0 +1,63 @@
+# GhostDrive nightly
+# ------------------
+# Daily full-suite run on both platforms with the exact flags documented in
+# docs/TESTING.md. Same steps as the test jobs in ci.yml — this exists so
+# that upstream dependency drift (PyPI releases, runner image changes) is
+# caught even when nobody pushes, and so failures have a clean, isolated
+# signal. Also runnable manually via workflow_dispatch.
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # every day at 03:00 UTC
+  workflow_dispatch:      # manual runs
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Cache poetry downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pypoetry
+            ~/AppData/Local/pypoetry/Cache
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+
+      - name: Install project and all dependency groups
+        run: poetry install --no-interaction
+
+      # Full suite, default (documented) flags — no fast-fail variant; we
+      # want the complete picture of what broke overnight.
+      - name: Run full test suite
+        run: poetry run python -m pytest -q --no-header -p no:cacheprovider --junitxml=pytest-junit.xml
+
+      - name: Upload pytest output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-${{ matrix.os }}
+          path: pytest-junit.xml
+          if-no-files-found: ignore
+          retention-days: 7

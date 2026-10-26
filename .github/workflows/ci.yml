@@ -1,0 +1,94 @@
+# GhostDrive CI
+# ------------
+# This codebase is Windows-heavy: file_lock uses msvcrt/LockFileEx, the tray,
+# drive monitors and installer packaging have Windows-specific paths. CI is
+# therefore honest about platform coverage — the FULL test suite runs on both
+# ubuntu-latest and windows-latest, on Python 3.12 (the README-recommended
+# version).
+#
+# Dependencies come from pyproject.toml + poetry.lock (poetry-core is the
+# build backend). All poetry groups (backends, web, phase2, tray, dev) are
+# non-optional, so `poetry install` brings in everything the ~604-test suite
+# imports — including paramiko/smbprotocol (NAS tests), Telethon/discord.py,
+# zfec, fastapi and pytest itself.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Lint ───────────────────────────────────────────────────────────────────
+  # The repo has no ruff configuration (no [tool.ruff] in pyproject.toml and
+  # no ruff.toml), so this uses ruff's default rule set. Baseline measured on
+  # 2026-10-26: 48 findings (43x F401, 4x F841, 1x E402; 44 auto-fixable).
+  # Non-blocking (continue-on-error) until that baseline is cleared; flip it
+  # to blocking once `ruff check ghostdrive tests` is clean.
+  lint:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install ruff
+        run: pip install ruff
+      - name: Ruff (non-blocking)
+        run: ruff check ghostdrive tests
+
+  # ── Full test suite, both platforms ────────────────────────────────────────
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false          # let the other OS finish even if one fails
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # pip's own download cache, keyed on pyproject.toml (the repo has no
+          # requirements*.txt). Caches the pip-installed tools below (poetry).
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      # Poetry has its own download cache, separate from pip's. Cache both
+      # possible OS locations keyed on the lockfile; the path that does not
+      # exist on the current OS is simply skipped by actions/cache.
+      - name: Cache poetry downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pypoetry
+            ~/AppData/Local/pypoetry/Cache
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+
+      - name: Install project and all dependency groups
+        run: poetry install --no-interaction
+
+      # Full suite with the documented flags (docs/TESTING.md). JUnit XML is
+      # always written so the failure artifact has something to upload.
+      - name: Run full test suite
+        run: poetry run python -m pytest -q --no-header -p no:cacheprovider --junitxml=pytest-junit.xml
+
+      - name: Upload pytest output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-${{ matrix.os }}
+          path: pytest-junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
