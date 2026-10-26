@@ -4,21 +4,40 @@ tests/test_nas_backend.py -- Unit tests for NASBackend (SFTP and SMB protocols).
 
 from __future__ import annotations
 
-import sys
 from unittest.mock import MagicMock
 
 # Mock paramiko, smbclient, and smbprotocol in sys.modules to allow testing
 # without requiring the actual external libraries to be installed.
 mock_paramiko = MagicMock()
-sys.modules['paramiko'] = mock_paramiko
 
-mock_smbclient = MagicMock()
-sys.modules['smbclient'] = mock_smbclient
-sys.modules['smbprotocol'] = MagicMock()
+import sys  # noqa: E402
+
+sys.modules.setdefault('paramiko', mock_paramiko)
+sys.modules.setdefault('smbclient', MagicMock())
+sys.modules.setdefault('smbprotocol', MagicMock())
 
 # Now we can safely import NASBackend
+from ghostdrive.backends import nas_backend as _nas_module  # noqa: E402
 from ghostdrive.backends.nas_backend import NASBackend  # noqa: E402
 import pytest  # noqa: E402
+
+mock_smbclient = MagicMock()
+
+
+@pytest.fixture(autouse=True)
+def _patch_nas_dependencies(monkeypatch):
+    """
+    NASBackend binds paramiko/smbclient at import time, so in a full-suite run
+    an earlier test may have already imported the real libraries (the
+    sys.modules mocks above then have no effect). Patch the module's own
+    references so these tests are hermetic regardless of import order.
+    """
+    mock_paramiko.reset_mock()
+    mock_smbclient.reset_mock()
+    monkeypatch.setattr(_nas_module, "paramiko", mock_paramiko, raising=False)
+    monkeypatch.setattr(_nas_module, "smbclient", mock_smbclient, raising=False)
+    monkeypatch.setattr(_nas_module, "_PARAMIKO_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(_nas_module, "_SMB_AVAILABLE", True, raising=False)
 
 
 # --- SFTP Protocol Tests ---
