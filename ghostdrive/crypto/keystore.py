@@ -667,6 +667,8 @@ class KeystoreManager:
         new_passphrase: bytes,
         hkdf_salt: Optional[bytes] = None,
         genesis_seed: Optional[bytes] = None,
+        calibrate: bool = True,
+        argon2_params: Optional[dict] = None,
     ) -> None:
         """
         Recovery from 24-word BIP39 seed phrase (Spec §4.3 — RECOVERY).
@@ -685,6 +687,9 @@ class KeystoreManager:
             new_passphrase: New passphrase for the new keystore.
             hkdf_salt:     Optional: restored 32-byte HKDF salt from backup.
             genesis_seed:  Optional: restored 32-byte HMAC genesis seed from backup.
+            calibrate:     If ``True`` (default), auto-calibrate Argon2id to ~1 s.
+            argon2_params: If provided, use these params instead of calibrating
+                           (testing hook; overrides ``calibrate``).
         """
         master_key = mnemonic_to_entropy(seed_phrase)
 
@@ -701,7 +706,9 @@ class KeystoreManager:
             )
             logger.info("Recovery: no salt/genesis seed provided. Deriving deterministically from Master Key.")
 
-        params = calibrate_argon2id(target_seconds=1.0)
+        params = argon2_params or (
+            calibrate_argon2id(target_seconds=1.0) if calibrate else _DEFAULT_ARGON2_PARAMS.copy()
+        )
 
         self._write_keystore(
             master_key=master_key,
