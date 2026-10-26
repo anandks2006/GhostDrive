@@ -1,402 +1,878 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GhostDrive - Encrypted Redundant Cloud</title>
+  <meta name="color-scheme" content="dark light">
+  <title>GhostDrive</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0b0e0b">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-180.png">
   <link rel="stylesheet" href="/static/css/styles.css">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
-<body class="dark-theme">
+<body>
+  <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-ghost" viewBox="0 0 24 24"><path d="M5 20V9a7 7 0 0 1 14 0v11l-2.4-1.8L14.2 20l-2.2-1.8L9.8 20l-2.4-1.8L5 20Z"/><path d="M9 10h.01M15 10h.01"/></symbol>
+    <symbol id="i-files" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m11 12 9-9M17 3h4v4M14 6l4 4"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4v-.2a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 19h16"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.7M20 5v6h-6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 3 20h18Z"/><path d="M12 9v5M12 17h.01"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
+    <symbol id="i-drive" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15h.01M11 15h6"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v5h5"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-7 7"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><path d="M4 4h16v4H4ZM5 8v12h14V8M10 12h4"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Z"/><path d="M9 12h6M9 16h6M14 3v5h5"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M3 8.5a15 15 0 0 1 18 0M6 12a10 10 0 0 1 12 0M9 15.5a5 5 0 0 1 6 0"/><circle cx="12" cy="19" r="1"/></symbol>
+  </svg>
 
-  <!-- ─── PREFLIGHT DIAGNOSTICS MODAL ──────────────────────────────────────── -->
-  <div id="preflight-modal" class="modal-overlay active">
-    <div class="glass-card modal-box">
-      <div class="modal-header">
-        <h2>⚡ Pre-Flight System Diagnostics</h2>
-        <p class="subtitle">Verifying cryptographic keyring, storage access, and reachability</p>
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
+  <div id="auth-screen" class="auth-shell">
+    <section class="auth-visual">
+      <div class="auth-visual-top">
+        <div class="brand">
+          <span class="brand-mark"><svg class="icon"><use href="#i-ghost"/></svg></span>
+          <span class="brand-name">GhostDrive</span>
+        </div>
+        <span class="pill">Private cloud</span>
       </div>
-      <div class="checklist">
-        <div class="check-item" id="check-keyring"><span class="icon">🔑</span> OS Keyring: <span class="status">Testing...</span></div>
-        <div class="check-item" id="check-db"><span class="icon">💽</span> Database Storage Access: <span class="status">Testing...</span></div>
-        <div class="check-item" id="check-net"><span class="icon">🌐</span> Network Connectivity: <span class="status">Testing...</span></div>
-        <div class="check-item" id="check-sys"><span class="icon">⚙️</span> System Environment (Long Paths / inotify): <span class="status">Testing...</span></div>
-      </div>
-      <div class="progress-bar-container">
-        <div class="progress-bar" id="preflight-progress" style="width: 0%;"></div>
-      </div>
-      <div class="modal-footer">
-        <button id="btn-retest-diag" class="btn btn-secondary" disabled>Retry Checks</button>
-        <button id="btn-proceed-diag" class="btn btn-primary" disabled>Proceed to App</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ─── UNLOCK / FIRST-RUN SETUP SCREEN ───────────────────────────────────── -->
-  <div id="auth-screen" class="screen hidden">
-    <div class="auth-card glass-card">
-      <div class="brand">
-        <div class="logo-icon">👻</div>
-        <h1>GHOSTDRIVE</h1>
-        <p class="tagline">Encrypted · Redundant · Multi-Backend Personal Cloud</p>
-      </div>
-
-      <!-- Unlock Form -->
-      <div id="unlock-form" class="auth-view">
-        <h3>Unlock Keystore</h3>
-        <p class="muted">Enter your master passphrase to decrypt your keystore and database ledger.</p>
-        <div class="form-group">
-          <label>Master Passphrase</label>
-          <input type="password" id="unlock-passphrase" placeholder="Enter passphrase..." autofocus>
-        </div>
-        <div class="error-msg hidden" id="unlock-error">Incorrect password. Please try again.</div>
-        <button id="btn-unlock" class="btn btn-primary btn-block">Unlock Vault</button>
-        <div class="auth-options">
-          <a href="#" id="link-restore">Restore from Seed Phrase</a>
+      <div class="auth-copy">
+        <span class="eyebrow">Zero-knowledge storage</span>
+        <h1>Your files.<br>Encrypted.<br><em>Everywhere.</em></h1>
+        <p>One vault across every drive you own. Client-side encryption, redundant backups, and no subscription.</p>
+        <div class="auth-stats">
+          <div><strong>5</strong><span>backend types</span></div>
+          <div><strong>4+2</strong><span>erasure coding</span></div>
+          <div><strong>0</strong><span>plaintext bytes</span></div>
         </div>
       </div>
-
-      <!-- Setup Form (First Run) -->
-      <div id="setup-form" class="auth-view hidden">
-        <h3>Initialize GhostDrive Vault</h3>
-        <p class="muted">Set a master passphrase to secure your cryptographic key derivation buffer.</p>
-        <div class="form-group">
-          <label>Create Passphrase</label>
-          <input type="password" id="setup-passphrase" placeholder="Choose a strong passphrase...">
-        </div>
-        <div class="form-group">
-          <label>Confirm Passphrase</label>
-          <input type="password" id="setup-confirm" placeholder="Confirm passphrase...">
-        </div>
-        <button id="btn-create-vault" class="btn btn-primary btn-block">Create New Vault</button>
+      <div class="auth-rings" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="auth-visual-footer">
+        <span>ChaCha20-Poly1305</span>
+        <span>Argon2id</span>
+        <span>BLAKE3</span>
       </div>
+    </section>
 
-      <!-- Seed Phrase Display Modal Step -->
-      <div id="seed-display-view" class="auth-view hidden">
-        <h3>🔑 BIP39 24-Word Genesis Seed</h3>
-        <p class="warning-box">⚠️ Store these 24 words in a secure location. They are required to recover your vault if your password is forgotten.</p>
-        <div class="seed-box" id="seed-words-container"></div>
-        <button id="btn-confirm-seed" class="btn btn-primary btn-block">I Have Saved My Seed Phrase</button>
+    <main class="auth-panel">
+      <div class="auth-form-wrap">
+        <div id="unlock-form" class="auth-form">
+          <span class="eyebrow">Welcome back</span>
+          <h2>Unlock your vault</h2>
+          <p class="muted">Your passphrase derives the key locally. It never leaves this device.</p>
+          <form id="unlock-form-el">
+            <label class="field">
+              <span>Master passphrase</span>
+              <div class="input-wrap">
+                <input id="unlock-passphrase" type="password" autocomplete="current-password" placeholder="Enter passphrase" autofocus>
+                <button type="button" class="reveal-btn" data-reveal="unlock-passphrase" aria-label="Show passphrase"><svg class="icon"><use href="#i-eye"/></svg></button>
+              </div>
+            </label>
+            <div id="unlock-error" class="form-error hidden"></div>
+            <button id="btn-unlock" class="btn btn-primary btn-block" type="submit">Unlock vault</button>
+          </form>
+          <div class="auth-links"><button class="link-button" id="link-restore" type="button">Restore from recovery phrase</button></div>
+        </div>
+
+        <div id="setup-form" class="auth-form hidden">
+          <span class="eyebrow">First run</span>
+          <h2>Create your vault</h2>
+          <p class="muted">Choose a strong passphrase. It protects every file and cannot be recovered by us.</p>
+          <form id="setup-form-el">
+            <label class="field">
+              <span>Create passphrase</span>
+              <div class="input-wrap">
+                <input id="setup-passphrase" type="password" autocomplete="new-password" placeholder="At least 8 characters">
+                <button type="button" class="reveal-btn" data-reveal="setup-passphrase" aria-label="Show passphrase"><svg class="icon"><use href="#i-eye"/></svg></button>
+              </div>
+            </label>
+            <label class="field">
+              <span>Confirm passphrase</span>
+              <input id="setup-confirm" type="password" autocomplete="new-password" placeholder="Repeat passphrase">
+            </label>
+            <div id="setup-error" class="form-error hidden"></div>
+            <button id="btn-create-vault" class="btn btn-primary btn-block" type="submit">Create vault</button>
+          </form>
+        </div>
+
+        <div id="restore-form" class="auth-form hidden">
+          <button class="back-link" id="link-back-unlock" type="button"><svg class="icon"><use href="#i-arrow-left"/></svg> Back to unlock</button>
+          <span class="eyebrow">Recovery</span>
+          <h2>Restore access</h2>
+          <p class="muted">Enter your 24-word recovery phrase and a new passphrase.</p>
+          <form id="restore-form-el">
+            <label class="field">
+              <span>Recovery phrase</span>
+              <textarea id="restore-seed" rows="3" placeholder="word one word two ..."></textarea>
+            </label>
+            <label class="field">
+              <span>New passphrase</span>
+              <input id="restore-passphrase" type="password" autocomplete="new-password" placeholder="New passphrase">
+            </label>
+            <div id="restore-error" class="form-error hidden"></div>
+            <button id="btn-restore" class="btn btn-primary btn-block" type="submit">Restore vault</button>
+          </form>
+        </div>
+
+        <div id="seed-view" class="auth-form hidden">
+          <span class="eyebrow">Save this now</span>
+          <h2>Recovery phrase</h2>
+          <p class="muted">These 24 words are the only way back into your vault if you lose your passphrase.</p>
+          <div id="seed-words" class="seed-grid"></div>
+          <div class="form-actions">
+            <button id="btn-copy-seed" class="btn btn-secondary" type="button"><svg class="icon"><use href="#i-copy"/></svg> Copy phrase</button>
+            <button id="btn-confirm-seed" class="btn btn-primary" type="button">I saved it</button>
+          </div>
+        </div>
+
+        <div class="auth-system">
+          <span class="status-dot" id="system-dot"></span>
+          <span id="system-text">Checking system readiness…</span>
+          <button id="btn-system-details" class="link-button" type="button">Details</button>
+        </div>
       </div>
-    </div>
-  </div>
-
-  <!-- ─── MAIN DASHBOARD APPLICATION ────────────────────────────────────────── -->
-  <div id="main-app" class="app-layout hidden">
-    <!-- Sidebar Navigation -->
-    <aside class="sidebar glass-panel">
-      <div class="brand">
-        <span class="logo-icon">👻</span>
-        <span class="brand-name">GhostDrive</span>
-      </div>
-      <nav class="nav-menu">
-        <button class="nav-btn active" data-target="files-view"><span class="icon">📁</span> Files</button>
-        <button class="nav-btn" data-target="backends-view"><span class="icon">⚡</span> Storage Backends</button>
-        <button class="nav-btn" data-target="analytics-view"><span class="icon">📊</span> Analytics</button>
-        <button class="nav-btn" data-target="resilience-view"><span class="icon">🛡️</span> Health & Scrub</button>
-        <button class="nav-btn" data-target="smart-view"><span class="icon">🧠</span> Smart Engine</button>
-        <button class="nav-btn" data-target="secrets-view"><span class="icon">🔑</span> Secrets</button>
-        <button class="nav-btn" data-target="sharing-view"><span class="icon">🔗</span> Shared Media</button>
-        <button class="nav-btn" data-target="telemetry-view"><span class="icon">📈</span> Live Telemetry</button>
-        <button class="nav-btn" data-target="settings-view"><span class="icon">⚙️</span> Settings</button>
-      </nav>
-      <div class="sidebar-footer">
-        <div class="vault-status"><span class="pulse-dot"></span> Vault Unlocked</div>
-        <button id="btn-lock-vault" class="btn btn-sm btn-secondary">Lock Vault</button>
-      </div>
-    </aside>
-
-    <!-- Main Content Area -->
-    <main class="main-content">
-      <!-- Header Bar -->
-      <header class="top-bar glass-panel">
-        <div class="search-box">
-          <span class="search-icon">🔍</span>
-          <input type="text" id="global-search" placeholder="Search files, hashes, or tags...">
-        </div>
-        <div class="header-actions">
-          <button id="btn-quick-upload" class="btn btn-primary">+ Upload File</button>
-          <div class="theme-indicator" id="theme-toggle">🌙</div>
-        </div>
-      </header>
-
-      <!-- View Containers -->
-
-      <!-- 1. FILES VIEW -->
-      <section id="files-view" class="view-panel active">
-        <div class="panel-header">
-          <div class="breadcrumbs" id="file-breadcrumbs">
-            <span class="crumb active" data-path="/">Root</span>
-          </div>
-          <div class="view-toggles">
-            <button class="filter-btn active" data-cat="all">All</button>
-            <button class="filter-btn" data-cat="images">Images</button>
-            <button class="filter-btn" data-cat="documents">Docs</button>
-            <button class="filter-btn" data-cat="media">Media</button>
-            <button class="filter-btn" data-cat="archives">Archives</button>
-          </div>
-        </div>
-
-        <!-- Drag & Drop Upload Zone -->
-        <div id="drop-zone" class="drop-zone">
-          <p>📥 Drag & Drop files here to encrypt & replicate across backends</p>
-        </div>
-
-        <!-- Files List Table -->
-        <div class="glass-card table-container">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Size</th>
-                <th>Redundancy Tier</th>
-                <th>Modified</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="files-table-body">
-              <!-- Dynamically rendered -->
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- 2. BACKENDS VIEW -->
-      <section id="backends-view" class="view-panel">
-        <div class="panel-header">
-          <h2>⚡ Multi-Backend Storage Tiers</h2>
-          <button class="btn btn-secondary" id="btn-test-all-backends">Test All Backends</button>
-        </div>
-        <div class="backend-grid" id="backend-cards-container">
-          <!-- Dynamically populated backend cards -->
-        </div>
-      </section>
-
-      <!-- 3. ANALYTICS VIEW -->
-      <section id="analytics-view" class="view-panel">
-        <div class="panel-header">
-          <h2>📊 Storage Analytics & Efficiency</h2>
-        </div>
-        <div class="stats-grid">
-          <div class="glass-card stat-card">
-            <div class="stat-title">Logical Files Volume</div>
-            <div class="stat-value" id="stat-logical">14.65 GB</div>
-          </div>
-          <div class="glass-card stat-card">
-            <div class="stat-title">Physical Replicated Volume</div>
-            <div class="stat-value" id="stat-physical">8.00 GB</div>
-          </div>
-          <div class="glass-card stat-card">
-            <div class="stat-title">Deduplication Savings</div>
-            <div class="stat-value accent" id="stat-dedup">4.00 GB (1.45x)</div>
-          </div>
-          <div class="glass-card stat-card">
-            <div class="stat-title">Compression Savings</div>
-            <div class="stat-value accent" id="stat-zstd">2.64 GB</div>
-          </div>
-        </div>
-        <div class="analytics-charts-grid">
-          <div class="glass-card chart-box">
-            <h3>Redundancy Tier Distribution</h3>
-            <div class="tier-bars-container" id="tier-bars"></div>
-          </div>
-          <div class="glass-card chart-box">
-            <h3>Backend Storage Breakdown</h3>
-            <div class="backend-usage-bars" id="backend-bars"></div>
-          </div>
-        </div>
-      </section>
-
-      <!-- 4. HEALTH & RESILIENCE VIEW -->
-      <section id="resilience-view" class="view-panel">
-        <div class="panel-header">
-          <h2>🛡️ Integrity Scrubbing & Erasure Coding</h2>
-          <button class="btn btn-primary" id="btn-trigger-scrub">Run Integrity Scrub</button>
-        </div>
-        <div class="resilience-overview glass-card">
-          <div class="health-score-ring">
-            <div class="score-number" id="health-score-val">99.8%</div>
-            <div class="score-label">Chunk Health Score</div>
-          </div>
-          <div class="ec-details">
-            <h4>Reed-Solomon Erasure Scheme</h4>
-            <p>Configured: <strong>zfec 4+2 Shards</strong> (4 Data + 2 Parity)</p>
-            <p class="muted">Tolerates complete failure or corruption of 2 remote backends without data loss.</p>
-          </div>
-        </div>
-        <div class="glass-card console-box">
-          <h3>Integrity Scrub Logs</h3>
-          <pre id="scrub-log-console" class="log-output"></pre>
-        </div>
-      </section>
-
-      <!-- 5. SMART ENGINE VIEW -->
-      <section id="smart-view" class="view-panel">
-        <div class="panel-header">
-          <h2>🧠 Smart Engine & Policy Controls</h2>
-        </div>
-        <div class="glass-card form-card">
-          <div class="setting-row">
-            <div>
-              <div class="setting-title">Auto-Tiering Engine</div>
-              <div class="setting-desc">Automatically move unused files to cold/disposable tiers after threshold</div>
-            </div>
-            <input type="checkbox" id="smart-autotier" checked>
-          </div>
-          <div class="setting-row">
-            <div>
-              <div class="setting-title">Thermal Throttling & Backpressure</div>
-              <div class="setting-desc">Throttle background upload workers if CPU temperature exceeds limits</div>
-            </div>
-            <input type="checkbox" id="smart-thermal" checked>
-          </div>
-          <div class="setting-row">
-            <div>
-              <div class="setting-title">Bandwidth Throttle Limit (KB/s)</div>
-              <div class="setting-desc">0 for unlimited maximum speed</div>
-            </div>
-            <input type="number" id="smart-bandwidth" value="0">
-          </div>
-        </div>
-      </section>
-
-      <!-- 6. SECRETS VIEW -->
-      <section id="secrets-view" class="view-panel">
-        <div class="panel-header">
-          <h2>🔑 Secrets & Keystore Management</h2>
-        </div>
-        <div class="glass-card form-card">
-          <h3>Master Seed Phrase</h3>
-          <p class="muted">View or backup your 24-word BIP39 genesis seed phrase.</p>
-          <button class="btn btn-secondary" id="btn-reveal-seed">Reveal 24-Word Seed Phrase</button>
-          <hr class="divider">
-          <h3>Change Master Passphrase</h3>
-          <div class="form-group">
-            <label>Current Passphrase</label>
-            <input type="password" id="change-pass-current">
-          </div>
-          <div class="form-group">
-            <label>New Passphrase</label>
-            <input type="password" id="change-pass-new">
-          </div>
-          <button class="btn btn-primary" id="btn-submit-change-pass">Update Passphrase</button>
-        </div>
-      </section>
-
-      <!-- 7. SHARED MEDIA VIEW -->
-      <section id="sharing-view" class="view-panel">
-        <div class="panel-header">
-          <h2>🔗 Shared Media & Public Links</h2>
-        </div>
-        <div class="glass-card table-container">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Link ID</th>
-                <th>File</th>
-                <th>Created</th>
-                <th>Expires</th>
-                <th>Access Count</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody id="shared-links-body">
-              <!-- Dynamically populated -->
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- 8. LIVE TELEMETRY VIEW -->
-      <section id="telemetry-view" class="view-panel">
-        <div class="panel-header">
-          <h2>📈 Live Telemetry & Pipeline Monitor</h2>
-        </div>
-        <div class="stats-grid">
-          <div class="glass-card stat-card">
-            <div class="stat-title">Upload Speed</div>
-            <div class="stat-value accent" id="tel-upload">0.0 KB/s</div>
-          </div>
-          <div class="glass-card stat-card">
-            <div class="stat-title">Download Speed</div>
-            <div class="stat-value accent" id="tel-download">0.0 KB/s</div>
-          </div>
-          <div class="glass-card stat-card">
-            <div class="stat-title">Active Workers</div>
-            <div class="stat-value" id="tel-threads">8 Threads</div>
-          </div>
-          <div class="glass-card stat-card">
-            <div class="stat-title">RAM / CPU Usage</div>
-            <div class="stat-value" id="tel-resources">-- MB / -- %</div>
-          </div>
-        </div>
-        <div class="glass-card console-box mt-16">
-          <h3>Real-time Event Feed</h3>
-          <pre id="telemetry-log-feed" class="log-output"></pre>
-        </div>
-      </section>
-
-      <!-- 9. SETTINGS VIEW -->
-      <section id="settings-view" class="view-panel">
-        <div class="panel-header">
-          <h2>⚙️ Application Preferences</h2>
-        </div>
-        <div class="glass-card form-card">
-          <div class="setting-row">
-            <div>
-              <div class="setting-title">Launch on System Startup</div>
-              <div class="setting-desc">Start GhostDrive in background on boot</div>
-            </div>
-            <input type="checkbox" id="sett-autostart">
-          </div>
-          <div class="setting-row">
-            <div>
-              <div class="setting-title">Desktop Notifications</div>
-              <div class="setting-desc">Display system toast alerts for upload completions & scrub alerts</div>
-            </div>
-            <input type="checkbox" id="sett-notifications" checked>
-          </div>
-          <div class="form-group mt-16">
-            <label>Accent Color</label>
-            <input type="color" id="sett-accent" value="#8b5cf6">
-          </div>
-        </div>
-      </section>
-
     </main>
   </div>
 
-  <!-- Toast Container -->
-  <div id="toast-container" class="toast-container"></div>
+  <div id="main-app" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand sidebar-brand">
+        <span class="brand-mark"><svg class="icon"><use href="#i-ghost"/></svg></span>
+        <span class="brand-name">GhostDrive</span>
+      </div>
 
-  <!-- File Upload Modal with Tier Advisor -->
-  <div id="upload-modal" class="modal-overlay">
-    <div class="glass-card modal-box">
-      <div class="modal-header">
-        <h2>📤 Upload File to GhostDrive</h2>
+      <div class="workspace-card">
+        <div class="workspace-icon"><svg class="icon"><use href="#i-database"/></svg></div>
+        <div><span>Personal vault</span><strong id="workspace-status">Unlocked</strong></div>
+        <span class="status-dot ok"></span>
       </div>
-      <div class="form-group">
-        <label>Select File</label>
-        <input type="file" id="modal-file-input">
+
+      <nav class="nav" aria-label="Main navigation">
+        <span class="nav-label">Library</span>
+        <button class="nav-item active" data-view="files"><svg class="icon"><use href="#i-files"/></svg><span>Files</span></button>
+        <button class="nav-item" data-view="shares"><svg class="icon"><use href="#i-link"/></svg><span>Shared links</span></button>
+        <button class="nav-item" data-view="trash"><svg class="icon"><use href="#i-trash"/></svg><span>Trash</span></button>
+
+        <span class="nav-label">Infrastructure</span>
+        <button class="nav-item" data-view="backends"><svg class="icon"><use href="#i-server"/></svg><span>Backends</span></button>
+        <button class="nav-item" data-view="health"><svg class="icon"><use href="#i-shield"/></svg><span>Health</span></button>
+        <button class="nav-item" data-view="sync"><svg class="icon"><use href="#i-refresh"/></svg><span>Sync &amp; versions</span></button>
+        <button class="nav-item" data-view="monitoring"><svg class="icon"><use href="#i-activity"/></svg><span>Monitor</span><span id="nav-alert-badge" class="nav-badge hidden">0</span></button>
+        <button class="nav-item" data-view="analytics"><svg class="icon"><use href="#i-chart"/></svg><span>Analytics</span></button>
+
+        <span class="nav-label">Control</span>
+        <button class="nav-item" data-view="smart"><svg class="icon"><use href="#i-cpu"/></svg><span>Smart engine</span></button>
+        <button class="nav-item" data-view="vault"><svg class="icon"><use href="#i-key"/></svg><span>Vault &amp; secrets</span></button>
+        <button class="nav-item" data-view="recovery"><svg class="icon"><use href="#i-archive"/></svg><span>Recovery kit</span></button>
+        <button class="nav-item" data-view="telemetry"><svg class="icon"><use href="#i-activity"/></svg><span>Telemetry</span></button>
+        <button class="nav-item" data-view="settings"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span></button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="system-line">
+          <span class="status-dot" id="sidebar-dot"></span>
+          <span id="sidebar-status">System ready</span>
+        </div>
+        <button id="btn-lock-vault" class="btn btn-secondary btn-block"><svg class="icon"><use href="#i-lock"/></svg><span>Lock vault</span></button>
       </div>
-      <div id="tier-advisor-banner" class="tier-advisor-banner hidden">
-        <strong>💡 Redundancy Tier Advisor Suggestion:</strong>
-        <p id="advisor-recommendation"></p>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="page-ident">
+          <span id="page-eyebrow">Workspace</span>
+          <h1 id="page-title">Files</h1>
+        </div>
+        <div class="topbar-actions">
+          <label class="search">
+            <svg class="icon"><use href="#i-search"/></svg>
+            <input id="global-search" type="search" placeholder="Search files, tags, hashes" autocomplete="off">
+            <kbd>/</kbd>
+          </label>
+          <button id="btn-quick-upload" class="btn btn-primary"><svg class="icon"><use href="#i-upload"/></svg><span>Upload</span></button>
+          <button id="btn-open-diagnostics" class="icon-button" title="System status"><svg class="icon"><use href="#i-shield"/></svg></button>
+        </div>
+      </header>
+
+      <main class="content">
+        <section id="view-files" class="view active">
+          <div class="page-head">
+            <div>
+              <span class="eyebrow">Library</span>
+              <h2>All files</h2>
+              <p id="files-subtitle">Encrypted, distributed, and recoverable.</p>
+            </div>
+            <div class="segmented" id="category-filters">
+              <button class="active" data-category="all">All</button>
+              <button data-category="images">Images</button>
+              <button data-category="documents">Docs</button>
+              <button data-category="media">Media</button>
+              <button data-category="archives">Archives</button>
+            </div>
+          </div>
+
+          <div id="drop-zone" class="drop-strip">
+            <span class="drop-icon"><svg class="icon"><use href="#i-upload"/></svg></span>
+            <div><strong>Drop files to encrypt and distribute</strong><span>or choose files from your device</span></div>
+            <button class="btn btn-secondary btn-sm" id="btn-browse-files" type="button">Browse</button>
+          </div>
+
+          <div class="panel table-panel">
+            <div class="panel-toolbar">
+              <span id="file-count" class="muted">Loading files…</span>
+              <div class="toolbar-actions">
+                <button class="icon-button" id="btn-refresh-files" title="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead><tr><th>Name</th><th class="hide-sm">Size</th><th class="hide-sm">Tier</th><th class="hide-md">Updated</th><th class="th-actions"></th></tr></thead>
+                <tbody id="files-table-body"></tbody>
+              </table>
+              <div id="files-empty" class="empty-state hidden">
+                <span class="empty-icon"><svg class="icon"><use href="#i-files"/></svg></span>
+                <h3>Your vault is empty</h3>
+                <p>Upload a file to encrypt it and distribute it across your backends.</p>
+                <button class="btn btn-primary" id="btn-empty-upload"><svg class="icon"><use href="#i-upload"/></svg> Upload a file</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-backends" class="view">
+          <div class="page-head">
+            <div><span class="eyebrow">Infrastructure</span><h2>Storage backends</h2><p>Connected storage, health, and capacity.</p></div>
+            <div class="head-actions">
+              <button class="btn btn-secondary" id="btn-test-all-backends"><svg class="icon"><use href="#i-activity"/></svg> Test all</button>
+              <button class="btn btn-primary" id="btn-add-backend"><svg class="icon"><use href="#i-plus"/></svg> Add backend</button>
+            </div>
+          </div>
+          <div class="metric-grid">
+            <div class="panel metric"><span>Backends</span><strong id="backend-count">—</strong><small>configured</small></div>
+            <div class="panel metric"><span>Healthy</span><strong id="backend-healthy">—</strong><small>reachable now</small></div>
+            <div class="panel metric"><span>Stored</span><strong id="backend-storage">—</strong><small>across all backends</small></div>
+          </div>
+          <div id="backend-grid" class="backend-grid"></div>
+          <div id="backends-empty" class="empty-state panel hidden"><span class="empty-icon"><svg class="icon"><use href="#i-server"/></svg></span><h3>No backends yet</h3><p>Add a local folder to start. You can attach more storage later.</p><button class="btn btn-primary" id="btn-empty-add-backend">Add backend</button></div>
+        </section>
+
+        <section id="view-analytics" class="view">
+          <div class="page-head"><div><span class="eyebrow">Insights</span><h2>Storage analytics</h2><p>Real usage from your vault index.</p></div><button class="icon-button" id="btn-refresh-analytics" title="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button></div>
+          <div class="metric-grid four">
+            <div class="panel metric"><span>Logical data</span><strong id="stat-logical">—</strong><small>before redundancy</small></div>
+            <div class="panel metric"><span>Physical data</span><strong id="stat-physical">—</strong><small>stored across backends</small></div>
+            <div class="panel metric"><span>Files</span><strong id="stat-files">—</strong><small>active objects</small></div>
+            <div class="panel metric"><span>Dedup ratio</span><strong id="stat-dedup">—</strong><small>logical / unique</small></div>
+          </div>
+          <div class="split-grid">
+            <div class="panel">
+              <div class="panel-heading"><div><h3>Tier distribution</h3><p>Where your data lives by redundancy.</p></div></div>
+              <div class="donut-row">
+                <div id="storage-donut" class="donut"><div class="donut-center"><strong id="donut-total">—</strong><span>total</span></div></div>
+                <div id="tier-bars" class="bar-list"></div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-heading"><div><h3>Backend usage</h3><p>Capacity consumed per backend.</p></div></div>
+              <div id="backend-usage" class="bar-list"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading"><div><h3>Upload history</h3><p>Most recent completed transfers.</p></div></div>
+            <div class="table-scroll">
+              <table class="data-table compact"><thead><tr><th>Month</th><th>Data transferred</th><th>Status</th></tr></thead><tbody id="upload-history-body"></tbody></table>
+              <div id="history-empty" class="empty-state small hidden"><p>No transfers recorded yet.</p></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-health" class="view">
+          <div class="page-head"><div><span class="eyebrow">Reliability</span><h2>Health &amp; resilience</h2><p>Chunk integrity, scrub results, and erasure recovery.</p></div><button class="btn btn-primary" id="btn-run-scrub"><svg class="icon"><use href="#i-shield"/></svg> Run scrub</button></div>
+          <div class="health-layout">
+            <div class="panel health-hero">
+              <div id="health-ring" class="health-ring"><div><strong id="health-score">—</strong><span>health score</span></div></div>
+              <div class="health-copy"><span class="eyebrow">Integrity</span><h3 id="health-label">Waiting for status</h3><p>Reed-Solomon 4+2 tolerates two lost shards per chunk.</p><div class="status-inline"><span class="status-dot" id="scrub-dot"></span><span id="scrub-status">Idle</span></div></div>
+            </div>
+            <div class="metric-grid four compact-grid">
+              <div class="panel metric"><span>Chunks</span><strong id="health-chunks">—</strong><small>indexed</small></div>
+              <div class="panel metric"><span>Verified</span><strong id="health-verified">—</strong><small>fully replicated</small></div>
+              <div class="panel metric"><span>Corrupted</span><strong id="health-corrupted">—</strong><small>needs repair</small></div>
+              <div class="panel metric"><span>Missing</span><strong id="health-missing">—</strong><small>incomplete mirrors</small></div>
+            </div>
+          </div>
+          <div class="panel durability-panel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">Worst case</span><h3>Durability contract</h3><p id="durability-summary">Measuring failure domains and shard survival.</p></div>
+              <span id="durability-state" class="pill durability-state">UNKNOWN</span>
+            </div>
+            <div class="durability-grid">
+              <div class="durability-stat"><span>Failure domains</span><strong id="durability-domains">-</strong><small>independent</small></div>
+              <div class="durability-stat"><span>Protected</span><strong id="durability-protected">-</strong><small>chunks meet contract</small></div>
+              <div class="durability-stat"><span>At risk</span><strong id="durability-at-risk">-</strong><small>below contract</small></div>
+              <div class="durability-stat"><span>Can survive</span><strong id="durability-survivable">-</strong><small>domain losses</small></div>
+            </div>
+            <div class="durability-split">
+              <div class="durability-findings-wrap">
+                <h4>Findings</h4>
+                <ul id="durability-findings" class="durability-findings"></ul>
+                <p id="durability-meta" class="durability-meta">Metadata and recovery checks pending.</p>
+              </div>
+              <div class="durability-controls">
+                <h4>Contract</h4>
+                <label class="field">
+                  <span>Preset</span>
+                  <select id="durability-preset">
+                    <option value="">Custom</option>
+                    <option value="basic">Basic - survive one domain loss</option>
+                    <option value="safe">Safe - survive two domain losses</option>
+                    <option value="paranoid">Paranoid - two losses plus offsite and proof</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Survive independent domain losses</span>
+                  <select id="durability-required">
+                    <option value="0">0 - no domain tolerance</option>
+                    <option value="1">1 - one device or provider</option>
+                    <option value="2">2 - two independent failures</option>
+                  </select>
+                </label>
+                <label class="setting-row"><div><strong>Require offsite provider</strong><span>Count a cloud provider as a separate failure domain.</span></div><span class="switch"><input type="checkbox" id="durability-offsite"><i></i></span></label>
+                <label class="setting-row"><div><strong>Require restore proof</strong><span>Block PROTECTED until a restore drill passes every 30 days.</span></div><span class="switch"><input type="checkbox" id="durability-restore-proof"><i></i></span></label>
+                <div class="form-actions">
+                  <button class="btn btn-secondary btn-sm" id="btn-confirm-recovery" type="button"><svg class="icon"><use href="#i-key"/></svg> Recovery phrase saved</button>
+                  <button class="btn btn-primary btn-sm" id="btn-save-durability" type="button">Save contract</button>
+                </div>
+                <div class="durability-actions">
+                  <button class="btn btn-secondary btn-sm" id="btn-create-snapshot" type="button"><svg class="icon"><use href="#i-shield"/></svg> Snapshot index</button>
+                  <button class="btn btn-secondary btn-sm" id="btn-run-drill" type="button"><svg class="icon"><use href="#i-check"/></svg> Restore drill</button>
+                  <button class="btn btn-secondary btn-sm" id="btn-evacuate" type="button"><svg class="icon"><use href="#i-upload"/></svg> Evacuate at-risk</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="panel durability-panel" id="what-if-panel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">Simulation</span><h3>What if a failure domain disappears?</h3><p>Select the domains that fail at the same time and inspect the real chunk layout.</p></div>
+              <span id="what-if-state" class="pill durability-state">IDLE</span>
+            </div>
+            <div class="what-if-body">
+              <div id="what-if-domains" class="what-if-domains"></div>
+              <div class="what-if-actions">
+                <button class="btn btn-primary btn-sm" id="btn-what-if" type="button">Simulate loss</button>
+                <button class="btn btn-ghost btn-sm" id="btn-what-if-reset" type="button">Clear</button>
+              </div>
+              <p id="what-if-result" class="durability-meta">Choose one or more independent domains to see which chunks survive.</p>
+            </div>
+          </div>
+          <div class="panel durability-panel" id="protection-panel">
+            <div class="panel-heading">
+              <div><span class="eyebrow">Always-on</span><h3>Protection sets</h3><p id="protection-summary">Mirror a local folder into the encrypted vault and keep it in sync.</p></div>
+              <button class="btn btn-secondary btn-sm" id="btn-scan-protection" type="button"><svg class="icon"><use href="#i-refresh"/></svg> Scan all</button>
+            </div>
+            <div id="protection-list" class="protection-list"></div>
+            <div class="protection-form">
+              <label class="field"><span>Label</span><input id="protection-name" type="text" placeholder="Family photos"></label>
+              <label class="field"><span>Local folder</span><input id="protection-source" type="text" placeholder="C:\Users\You\Pictures"></label>
+              <label class="field"><span>Vault destination</span><input id="protection-destination" type="text" value="/" placeholder="/protected"></label>
+              <label class="field"><span>Tier</span><select id="protection-tier"><option value="IMPORTANT">IMPORTANT</option><option value="CRITICAL">CRITICAL</option><option value="DISPOSABLE">DISPOSABLE</option></select></label>
+              <button class="btn btn-primary btn-sm" id="btn-add-protection" type="button"><svg class="icon"><use href="#i-plus"/></svg> Add protection set</button>
+            </div>
+          </div>
+          <div class="split-grid">
+            <div class="panel">
+              <div class="panel-heading"><div><h3>Scrub log</h3><p id="last-scrub">No scrub yet.</p></div></div>
+              <pre id="scrub-log" class="log"></pre>
+            </div>
+            <div class="panel">
+              <div class="panel-heading"><div><h3>Recent events</h3><p>Latest integrity checks.</p></div></div>
+              <div id="integrity-events" class="event-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-sync" class="view">
+          <div class="page-head">
+            <div><span class="eyebrow">Automation</span><h2>Sync &amp; versions</h2><p>Mirror a local folder into the vault and keep a full version chain.</p></div>
+            <div class="head-actions">
+              <button class="btn btn-secondary" id="btn-sync-start" type="button">Start</button>
+              <button class="btn btn-secondary" id="btn-sync-stop" type="button">Stop</button>
+              <button class="btn btn-primary" id="btn-sync-run" type="button"><svg class="icon"><use href="#i-refresh"/></svg> Run now</button>
+            </div>
+          </div>
+          <div class="split-grid">
+            <div class="panel form-panel">
+              <div class="panel-heading">
+                <div><h3>Sync scheduler</h3><p id="sync-status-summary">Loading scheduler state.</p></div>
+                <span id="sync-state-pill" class="pill durability-state">OFF</span>
+              </div>
+              <div class="state-list">
+                <div><span>Root</span><strong id="sync-root">—</strong></div>
+                <div><span>Enabled</span><strong class="inline-status"><span class="status-dot" id="sync-enabled-dot"></span><span id="sync-enabled-text">—</span></strong></div>
+                <div><span>Scheduler</span><strong class="inline-status"><span class="status-dot" id="sync-running-dot"></span><span id="sync-running-text">Idle</span></strong></div>
+                <div><span>Interval</span><strong id="sync-interval">—</strong></div>
+                <div><span>Last run</span><strong id="sync-last-run">Never</strong></div>
+              </div>
+              <div class="divider"></div>
+              <form id="sync-settings-form" class="settings-form">
+                <span class="eyebrow form-eyebrow">Settings</span>
+                <label class="field"><span>Root folder</span><input id="sync-root-input" type="text" placeholder="C:\Users\You\Documents" autocomplete="off"></label>
+                <div class="field-grid">
+                  <label class="field"><span>Interval (seconds)</span><input id="sync-interval-input" type="number" min="15" step="15" value="60"></label>
+                  <label class="setting-row"><div><strong>Enabled</strong><span>Run the scheduler automatically.</span></div><span class="switch"><input type="checkbox" id="sync-enabled-input"><i></i></span></label>
+                </div>
+                <div id="sync-settings-error" class="form-error hidden"></div>
+                <button class="btn btn-primary btn-block" type="submit" id="btn-sync-save">Save settings</button>
+              </form>
+            </div>
+            <div class="panel">
+              <div class="panel-heading"><div><h3>Last pass</h3><p id="sync-last-result-note">No sync pass has run yet.</p></div></div>
+              <div class="state-list">
+                <div><span>Scanned</span><strong id="sync-scanned">—</strong></div>
+                <div><span>Uploaded</span><strong id="sync-uploaded">—</strong></div>
+                <div><span>Unchanged</span><strong id="sync-unchanged">—</strong></div>
+                <div><span>Versioned</span><strong id="sync-versioned">—</strong></div>
+                <div><span>Trashed</span><strong id="sync-trashed">—</strong></div>
+                <div><span>Errors</span><strong id="sync-errors">—</strong></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading">
+              <div><h3>Version history</h3><p>Immutable snapshots kept for every change. Restore or prune below.</p></div>
+            </div>
+            <div class="protection-form">
+              <label class="field"><span>File</span><select id="versions-file"><option value="">Select a file…</option></select></label>
+              <label class="field"><span>Keep newest versions</span><input id="versions-keep" type="number" min="1" max="1000" value="10"></label>
+              <button class="btn btn-primary btn-sm" id="btn-load-versions" type="button">Load versions</button>
+              <button class="btn btn-secondary btn-sm" id="btn-prune-versions" type="button">Prune</button>
+            </div>
+            <div class="table-scroll">
+              <div id="versions-error" class="form-error hidden" style="margin:12px 20px 0"></div>
+              <table class="data-table compact hidden">
+                <thead><tr><th>Version</th><th>Reason</th><th class="hide-sm">Size</th><th class="hide-md">Created</th><th>Status</th><th class="th-actions"></th></tr></thead>
+                <tbody id="versions-body"></tbody>
+              </table>
+              <div id="versions-empty" class="empty-state small"><p>Choose a file and load its version history.</p></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-monitoring" class="view">
+          <div class="page-head">
+            <div><span class="eyebrow">Reliability</span><h2>Monitor</h2><p>Durability badge, restore drills, and live alerts.</p></div>
+            <div class="head-actions">
+              <button class="btn btn-secondary" id="btn-copy-badge-url" type="button"><svg class="icon"><use href="#i-copy"/></svg> Copy badge URL</button>
+              <button class="btn btn-primary" id="btn-run-monitor-drill" type="button"><svg class="icon"><use href="#i-shield"/></svg> Run drill</button>
+            </div>
+          </div>
+          <div class="split-grid">
+            <div class="panel">
+              <div class="panel-heading">
+                <div><h3>Durability badge</h3><p id="badge-checked-at">Waiting for the first check.</p></div>
+                <span id="monitor-badge-pill" class="pill badge-verdict badge-green">…</span>
+              </div>
+              <div class="state-list">
+                <div><span>Verdict</span><strong id="monitor-badge-label">—</strong></div>
+                <div><span>Active alerts</span><strong id="monitor-active-alerts">0</strong></div>
+                <div><span>Contract</span><strong id="monitor-contract">—</strong></div>
+              </div>
+              <div class="divider"></div>
+              <div class="badge-embed">
+                <img id="monitor-badge-img" class="monitor-badge-img" src="/api/monitoring/badge.svg" alt="GhostDrive durability badge">
+                <p class="muted form-note">Embed this badge in a README or status page — the copy button copies its public URL.</p>
+              </div>
+            </div>
+            <div class="panel form-panel">
+              <div class="panel-heading"><div><h3>Scheduler</h3><p>Automatic drills and alert evaluation cadence.</p></div></div>
+              <div class="state-list">
+                <div><span>Drill loop</span><strong id="monitor-drill-scheduler">—</strong></div>
+                <div><span>Alert loop</span><strong id="monitor-alert-scheduler">—</strong></div>
+              </div>
+              <div class="divider"></div>
+              <button class="btn btn-secondary btn-block" id="btn-evaluate-alerts" type="button"><svg class="icon"><use href="#i-activity"/></svg> Evaluate alerts now</button>
+            </div>
+          </div>
+          <div class="metric-grid">
+            <div class="panel metric"><span>Drills</span><strong id="drill-total">—</strong><small>recorded</small></div>
+            <div class="panel metric"><span>Passed</span><strong id="drill-passed">—</strong><small>restores proven</small></div>
+            <div class="panel metric"><span>Failed</span><strong id="drill-failed">—</strong><small>need attention</small></div>
+            <div class="panel metric"><span>Streak</span><strong id="drill-consecutive">—</strong><small>consecutive failures</small></div>
+            <div class="panel metric"><span>Stale proof</span><strong id="drill-stale">—</strong><small>older than 14 days</small></div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading">
+              <div><h3>Restore drill history</h3><p id="drill-summary-line">No restore drills recorded yet.</p></div>
+              <span id="drill-stale-pill" class="pill badge-verdict badge-green">FRESH</span>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table compact">
+                <thead><tr><th>Started</th><th>Result</th><th class="hide-sm">Restored</th><th class="hide-md">Duration</th><th>Detail</th></tr></thead>
+                <tbody id="drills-body"></tbody>
+              </table>
+              <div id="drills-empty" class="empty-state small hidden"><p>No drills yet — run one to prove your restore path.</p></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading"><div><h3>Active alerts</h3><p>Evaluated continuously — dismiss what you have handled.</p></div></div>
+            <div id="alerts-list"></div>
+          </div>
+        </section>
+
+        <section id="view-smart" class="view">
+          <div class="page-head"><div><span class="eyebrow">Automation</span><h2>Smart engine</h2><p>Thermal protection, tiering, and bandwidth policy.</p></div><button class="btn btn-primary" id="btn-save-smart">Save changes</button></div>
+          <div class="split-grid">
+            <div class="panel form-panel">
+              <div class="panel-heading"><div><h3>Policy</h3><p>Applied to new transfers immediately.</p></div></div>
+              <form id="smart-form" class="settings-form">
+                <label class="setting-row"><div><strong>Background sync</strong><span>Run health checks and maintenance tasks.</span></div><span class="switch"><input type="checkbox" id="smart-background-sync"><i></i></span></label>
+                <label class="setting-row"><div><strong>Automatic tiering</strong><span>Move idle files to lower-cost tiers.</span></div><span class="switch"><input type="checkbox" id="smart-auto-tier"><i></i></span></label>
+                <label class="field inline-field"><span>Idle days before tiering</span><input type="number" id="smart-tier-days" min="1" max="365"></label>
+                <label class="setting-row"><div><strong>Thermal throttling</strong><span>Reduce throughput when the CPU is hot.</span></div><span class="switch"><input type="checkbox" id="smart-thermal"><i></i></span></label>
+                <label class="field inline-field"><span>CPU cap (%)</span><input type="number" id="smart-cpu-cap" min="10" max="100"></label>
+                <label class="field inline-field"><span>Bandwidth limit (KB/s)</span><input type="number" id="smart-bandwidth" min="0" step="64"></label>
+                <label class="setting-row"><div><strong>Battery saver</strong><span>Pause or slow background work on battery.</span></div><span class="switch"><input type="checkbox" id="smart-battery"><i></i></span></label>
+              </form>
+            </div>
+            <div class="panel">
+              <div class="panel-heading"><div><h3>Live state</h3><p>Current system pressure.</p></div></div>
+              <div class="state-list">
+                <div><span>CPU</span><strong id="thermal-cpu">—</strong></div>
+                <div><span>Temperature</span><strong id="thermal-temp">—</strong></div>
+                <div><span>Throttling</span><strong id="thermal-state">—</strong></div>
+                <div><span>Backpressure</span><strong id="thermal-backpressure">—</strong></div>
+              </div>
+              <div class="notice" id="thermal-notice">Smart engine status will appear after loading.</div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-vault" class="view">
+          <div class="page-head"><div><span class="eyebrow">Security</span><h2>Vault &amp; secrets</h2><p>Recovery controls and encrypted credentials.</p></div><button class="btn btn-primary" id="btn-add-secret"><svg class="icon"><use href="#i-plus"/></svg> Add secret</button></div>
+          <div class="split-grid">
+            <div class="panel">
+              <div class="panel-heading"><div><h3>Encrypted secrets</h3><p>Passwords, API keys, notes, and SSH keys.</p></div><button class="icon-button" id="btn-refresh-secrets" title="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button></div>
+              <div class="table-scroll">
+                <table class="data-table compact"><thead><tr><th>Label</th><th>Kind</th><th class="hide-sm">Created</th><th class="th-actions"></th></tr></thead><tbody id="secrets-body"></tbody></table>
+                <div id="secrets-empty" class="empty-state small hidden"><p>No secrets stored yet.</p></div>
+              </div>
+            </div>
+            <div class="panel form-panel">
+              <div class="panel-heading"><div><h3>Recovery</h3><p>Back up access to this vault.</p></div></div>
+              <button class="btn btn-secondary btn-block" id="btn-reveal-seed"><svg class="icon"><use href="#i-key"/></svg> Reveal recovery phrase</button>
+              <div class="divider"></div>
+              <form id="change-pass-form" class="settings-form">
+                <label class="field"><span>Current passphrase</span><input type="password" id="change-pass-current" autocomplete="current-password"></label>
+                <label class="field"><span>New passphrase</span><input type="password" id="change-pass-new" autocomplete="new-password"></label>
+                <button class="btn btn-secondary btn-block" type="submit" id="btn-change-pass">Update passphrase</button>
+              </form>
+              <div class="divider"></div>
+              <div class="security-line"><span>Post-quantum module</span><strong id="pq-mode">Checking…</strong></div>
+              <div class="security-line"><span>Status</span><strong class="inline-status"><span class="status-dot" id="pq-status-dot"></span><span id="pq-status-text">Checking…</span></strong></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-recovery" class="view">
+          <div class="page-head"><div><span class="eyebrow">Disaster recovery</span><h2>Recovery kit</h2><p>Shamir key shares and portable vault backups.</p></div></div>
+          <div class="split-grid">
+            <div class="panel form-panel">
+              <div class="panel-heading"><div><h3>Key shares (<span id="recovery-ratio">3-of-5</span>)</h3><p>Split the master key into shares. Any threshold set restores the vault.</p></div><span class="pill" id="recovery-kit-pill">CHECKING</span></div>
+              <div class="state-list">
+                <div><span>Vault</span><strong class="inline-status"><span class="status-dot" id="recovery-lock-dot"></span><span id="recovery-lock-text">Checking…</span></strong></div>
+                <div><span>Threshold</span><strong id="recovery-threshold-summary">—</strong></div>
+              </div>
+              <div class="divider"></div>
+              <form id="recovery-export-form" class="settings-form">
+                <span class="eyebrow form-eyebrow">Export kit</span>
+                <div class="field-grid">
+                  <label class="field"><span>Shares (threshold)</span><input id="recovery-threshold" type="number" min="2" max="255" value="3"></label>
+                  <label class="field"><span>Total shares</span><input id="recovery-total" type="number" min="2" max="255" value="5"></label>
+                </div>
+                <label class="field"><span>Label (optional)</span><input id="recovery-kit-label" type="text" placeholder="e.g. Home safe kit"></label>
+                <button class="btn btn-primary btn-block" type="submit" id="btn-export-kit"><svg class="icon"><use href="#i-download"/></svg> Export key shares</button>
+                <p class="muted form-note" id="recovery-export-note">Downloads one .gdshare file per share plus a manifest.</p>
+              </form>
+              <div class="divider"></div>
+              <form id="recovery-restore-form" class="settings-form">
+                <span class="eyebrow form-eyebrow">Restore from shares</span>
+                <label class="field"><span>Pasted shares — one per line, each starting with GDSHARE1:</span><textarea id="recovery-shares-input" rows="5" placeholder="GDSHARE1:..."></textarea></label>
+                <p class="muted recovery-preview" id="recovery-preview-status">Paste shares to validate them.</p>
+                <label class="field"><span>New passphrase</span><input id="recovery-restore-passphrase" type="password" autocomplete="new-password" placeholder="New passphrase for the restored vault"></label>
+                <div id="recovery-restore-error" class="form-error hidden"></div>
+                <button class="btn btn-secondary btn-block" type="submit" id="btn-restore-kit"><svg class="icon"><use href="#i-key"/></svg> Restore vault from shares</button>
+              </form>
+              <div class="divider"></div>
+              <div class="recovery-tool">
+                <p class="muted">No browser nearby? Restore offline from the command line:</p>
+                <code id="recovery-offline-tool">python -m ghostdrive.cli.recovery_tool</code>
+              </div>
+            </div>
+
+            <div class="panel form-panel">
+              <div class="panel-heading"><div><h3>Portable vault (.gdvault)</h3><p>One encrypted archive for moving or backing up the whole vault.</p></div><span class="pill" id="portable-pill">CHECKING</span></div>
+              <div class="state-list">
+                <div><span>Format</span><strong id="portable-format">—</strong></div>
+              </div>
+              <div class="divider"></div>
+              <form id="portable-export-form" class="settings-form">
+                <span class="eyebrow form-eyebrow">Export</span>
+                <label class="field"><span>Archive passphrase</span><input id="portable-export-passphrase" type="password" autocomplete="new-password" placeholder="Protects the .gdvault file"></label>
+                <label class="setting-row"><div><strong>Include index snapshot</strong><span>Embed the file index so restore works on a fresh machine.</span></div><span class="switch"><input type="checkbox" id="portable-include-index" checked><i></i></span></label>
+                <button class="btn btn-primary btn-block" type="submit" id="btn-export-vault"><svg class="icon"><use href="#i-download"/></svg> Export .gdvault</button>
+                <p class="muted form-note" id="portable-export-note">Unlock the vault to export a portable archive.</p>
+              </form>
+              <div class="divider"></div>
+              <form id="portable-import-form" class="settings-form">
+                <span class="eyebrow form-eyebrow">Import</span>
+                <label class="field"><span>Vault file</span><input id="portable-import-file" type="file" accept=".gdvault"></label>
+                <label class="field"><span>Archive passphrase</span><input id="portable-import-passphrase" type="password" autocomplete="current-password"></label>
+                <label class="setting-row"><div><strong>Restore index snapshot</strong><span>Replace the local file index with the archived one.</span></div><span class="switch"><input type="checkbox" id="portable-restore-index"><i></i></span></label>
+                <div id="portable-import-error" class="form-error hidden"></div>
+                <div class="form-actions">
+                  <button class="btn btn-secondary" type="button" id="btn-inspect-vault">Check file</button>
+                  <button class="btn btn-primary" type="submit" id="btn-import-vault"><svg class="icon"><use href="#i-upload"/></svg> Import vault</button>
+                </div>
+                <p class="muted form-note hidden" id="portable-inspect-result"></p>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-shares" class="view">
+          <div class="page-head"><div><span class="eyebrow">Delivery</span><h2>Shared links</h2><p>Time-limited public access to individual files.</p></div><button class="icon-button" id="btn-refresh-shares" title="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button></div>
+          <div class="panel">
+            <div class="table-scroll">
+              <table class="data-table"><thead><tr><th>File</th><th class="hide-md">Created</th><th>Expires</th><th>Downloads</th><th class="th-actions"></th></tr></thead><tbody id="shares-body"></tbody></table>
+              <div id="shares-empty" class="empty-state hidden"><span class="empty-icon"><svg class="icon"><use href="#i-link"/></svg></span><h3>No active links</h3><p>Create one from the file actions menu.</p></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-telemetry" class="view">
+          <div class="page-head"><div><span class="eyebrow">Monitor</span><h2>Live telemetry</h2><p>Transfer throughput and pipeline activity.</p></div><span class="live-badge"><span class="status-dot ok" id="telemetry-live"></span> Live</span></div>
+          <div class="metric-grid four">
+            <div class="panel metric"><span>Upload</span><strong id="tel-upload">0 KB/s</strong><small>current rate</small></div>
+            <div class="panel metric"><span>Download</span><strong id="tel-download">0 KB/s</strong><small>current rate</small></div>
+            <div class="panel metric"><span>Workers</span><strong id="tel-threads">0</strong><small>active threads</small></div>
+            <div class="panel metric"><span>Resources</span><strong id="tel-resources">—</strong><small>RAM / CPU</small></div>
+          </div>
+          <div class="panel">
+            <div class="panel-heading"><div><h3>Event feed</h3><p>Latest pipeline messages.</p></div><button class="btn btn-secondary btn-sm" id="btn-clear-telemetry">Clear</button></div>
+            <div id="telemetry-feed" class="event-feed"></div>
+          </div>
+        </section>
+
+        <section id="view-trash" class="view">
+          <div class="page-head"><div><span class="eyebrow">Recovery</span><h2>Trash</h2><p id="trash-subtitle">Deleted files stay here until purged.</p></div><button class="btn btn-secondary" id="btn-empty-trash"><svg class="icon"><use href="#i-trash"/></svg> Empty trash</button></div>
+          <div class="panel">
+            <div class="table-scroll">
+              <table class="data-table"><thead><tr><th>Name</th><th class="hide-sm">Tier</th><th class="hide-md">Deleted</th><th class="hide-sm">Size</th><th class="th-actions"></th></tr></thead><tbody id="trash-body"></tbody></table>
+              <div id="trash-empty" class="empty-state hidden"><span class="empty-icon"><svg class="icon"><use href="#i-trash"/></svg></span><h3>Trash is empty</h3><p>Deleted files will appear here.</p></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-settings" class="view">
+          <div class="page-head"><div><span class="eyebrow">Preferences</span><h2>Settings</h2><p>Appearance, startup, and network behavior.</p></div><button class="btn btn-primary" id="btn-save-settings">Save changes</button></div>
+          <div class="split-grid">
+            <div class="panel form-panel">
+              <div class="panel-heading"><div><h3>Appearance</h3><p>Make the workspace yours.</p></div></div>
+              <form id="settings-form" class="settings-form">
+                <label class="field"><span>Theme</span><select id="setting-theme"><option value="dark">Dark</option><option value="light">Light</option><option value="system">System</option></select></label>
+                <label class="field"><span>Accent color</span><div class="color-field"><input type="color" id="setting-accent" value="#c4f56a"><code id="accent-value">#C4F56A</code></div></label>
+                <label class="setting-row"><div><strong>Launch on startup</strong><span>Start GhostDrive when you sign in.</span></div><span class="switch"><input type="checkbox" id="setting-autostart"><i></i></span></label>
+                <label class="setting-row"><div><strong>Desktop notifications</strong><span>Show alerts for uploads and scrubs.</span></div><span class="switch"><input type="checkbox" id="setting-notifications"><i></i></span></label>
+              </form>
+              <div class="divider"></div>
+              <button class="btn btn-secondary btn-block hidden" id="btn-install-app" type="button"><svg class="icon"><use href="#i-download"/></svg> Install app</button>
+              <p class="muted hidden" id="install-note"></p>
+            </div>
+            <div class="panel form-panel">
+              <div class="panel-heading"><div><h3>Network &amp; logs</h3><p>Proxy and diagnostics.</p></div></div>
+              <form id="network-form" class="settings-form">
+                <label class="field"><span>Log level</span><select id="setting-log-level"><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select></label>
+                <label class="field"><span>Proxy type</span><select id="setting-proxy-type"><option value="none">None</option><option value="socks5">SOCKS5</option><option value="http">HTTP</option></select></label>
+                <label class="field"><span>Proxy host</span><input id="setting-proxy-host" placeholder="127.0.0.1"></label>
+                <label class="field"><span>Proxy port</span><input id="setting-proxy-port" type="number" min="0" max="65535" placeholder="1080"></label>
+                <button class="btn btn-secondary btn-block" type="button" id="btn-open-diagnostics-2">Run system diagnostics</button>
+              </form>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <aside id="detail-drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-backdrop" data-close-drawer></div>
+    <div class="drawer-panel">
+      <header class="drawer-header">
+        <div><span class="eyebrow">File details</span><h2 id="detail-title">Details</h2></div>
+        <button class="icon-button" id="btn-close-drawer" aria-label="Close details"><svg class="icon"><use href="#i-close"/></svg></button>
+      </header>
+      <div id="detail-content" class="drawer-content"></div>
+    </div>
+  </aside>
+
+  <div id="upload-modal" class="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="upload-title">
+      <div class="modal-head"><div><span class="eyebrow">New object</span><h2 id="upload-title">Upload file</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <div id="upload-drop" class="upload-zone">
+        <span class="upload-zone-icon"><svg class="icon"><use href="#i-upload"/></svg></span>
+        <strong>Drop a file here</strong>
+        <span>or <button class="link-button" id="btn-upload-browse" type="button">browse your device</button></span>
+        <input id="upload-file" type="file" hidden>
       </div>
-      <div class="form-group">
-        <label>Storage Redundancy Tier</label>
-        <select id="modal-tier-select">
-          <option value="CRITICAL">CRITICAL (4x Redundancy - Keys & Credentials)</option>
-          <option value="IMPORTANT" selected>IMPORTANT (3x Redundancy - Photos & Documents)</option>
-          <option value="DISPOSABLE">DISPOSABLE (2x Redundancy - ML Datasets & Archives)</option>
-        </select>
+      <div id="upload-file-row" class="selected-file hidden"></div>
+      <div class="tier-picker">
+        <label class="tier-option"><input type="radio" name="upload-tier" value="CRITICAL"><span class="tier-card"><strong>Critical</strong><small>4 copies · keys, documents</small></span></label>
+        <label class="tier-option"><input type="radio" name="upload-tier" value="IMPORTANT" checked><span class="tier-card"><strong>Important</strong><small>3 copies · everyday files</small></span></label>
+        <label class="tier-option"><input type="radio" name="upload-tier" value="DISPOSABLE"><span class="tier-card"><strong>Disposable</strong><small>2 copies · large datasets</small></span></label>
       </div>
-      <div class="modal-footer">
-        <button id="btn-cancel-upload" class="btn btn-secondary">Cancel</button>
-        <button id="btn-confirm-upload" class="btn btn-primary">Start Encrypted Upload</button>
-      </div>
+      <div id="upload-advisor" class="notice hidden"></div>
+      <div id="upload-progress" class="upload-progress hidden"><div class="progress"><span id="upload-progress-bar"></span></div><span id="upload-progress-label">Encrypting…</span></div>
+      <div class="modal-actions"><button class="btn btn-secondary" data-close-modal type="button">Cancel</button><button class="btn btn-primary" id="btn-upload-start" type="button"><svg class="icon"><use href="#i-lock"/></svg> Encrypt &amp; upload</button></div>
+    </div>
+  </div>
+
+  <div id="backend-modal" class="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="backend-title">
+      <div class="modal-head"><div><span class="eyebrow">Infrastructure</span><h2 id="backend-title">Add backend</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <form id="backend-form">
+        <div class="field-grid">
+          <label class="field"><span>Provider</span><select id="backend-provider"><option value="local">Local encrypted folder</option><option value="external">External drive</option><option value="nas">NAS / SMB / SFTP</option><option value="telegram">Telegram</option><option value="discord">Discord</option></select></label>
+          <label class="field"><span>Display name</span><input id="backend-name" placeholder="e.g. Archive drive" required></label>
+        </div>
+        <div id="backend-fields" class="field-stack"></div>
+        <label class="field"><span>Quota cap (GB, 0 = unlimited)</span><input id="backend-quota" type="number" min="0" step="1" value="0"></label>
+        <div id="backend-error" class="form-error hidden"></div>
+        <div class="modal-actions"><button class="btn btn-secondary" data-close-modal type="button">Cancel</button><button class="btn btn-primary" type="submit" id="btn-backend-save">Add backend</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="share-modal" class="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="share-title">
+      <div class="modal-head"><div><span class="eyebrow">Delivery</span><h2 id="share-title">Create share link</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <p id="share-file-name" class="muted"></p>
+      <form id="share-form">
+        <div class="field-grid">
+          <label class="field"><span>Expires in</span><select id="share-ttl"><option value="1">1 hour</option><option value="24" selected>24 hours</option><option value="168">7 days</option><option value="720">30 days</option></select></label>
+          <label class="field"><span>Max downloads</span><input id="share-max-downloads" type="number" min="1" placeholder="Unlimited"></label>
+        </div>
+        <label class="setting-row"><div><strong>Require passcode</strong><span>Recipient must enter a passcode.</span></div><span class="switch"><input type="checkbox" id="share-passcode-enabled"><i></i></span></label>
+        <label class="field hidden" id="share-passcode-field"><span>Passcode</span><input id="share-passcode" type="password" placeholder="Share passcode"></label>
+        <div id="share-error" class="form-error hidden"></div>
+        <div id="share-result" class="share-result hidden">
+          <span>Link ready</span>
+          <div class="copy-row"><input id="share-url" readonly><button class="btn btn-secondary btn-sm" type="button" id="btn-copy-share"><svg class="icon"><use href="#i-copy"/></svg> Copy</button></div>
+        </div>
+        <div class="divider"></div>
+        <p class="muted form-note">Prefer end-to-end privacy? <button class="link-button" id="btn-envelope-from-share" type="button">Create a zero-knowledge envelope link</button> — the decryption key never touches the server.</p>
+        <div class="modal-actions"><button class="btn btn-secondary" data-close-modal type="button">Close</button><button class="btn btn-primary" type="submit" id="btn-share-create"><svg class="icon"><use href="#i-link"/></svg> Create link</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="envelope-modal" class="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="envelope-title">
+      <div class="modal-head"><div><span class="eyebrow">Zero-knowledge</span><h2 id="envelope-title">Envelope link</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <p id="envelope-file-name" class="muted"></p>
+      <form id="envelope-form">
+        <div class="field-grid">
+          <label class="field"><span>Expires in</span><select id="envelope-ttl"><option value="1">1 hour</option><option value="24">24 hours</option><option value="72" selected>3 days</option><option value="168">7 days</option></select></label>
+          <label class="field"><span>Max downloads</span><input id="envelope-max-downloads" type="number" min="1" placeholder="Unlimited"></label>
+        </div>
+        <div id="envelope-result" class="share-result hidden">
+          <span>Envelope link ready</span>
+          <div class="copy-row"><input id="envelope-url" readonly><button class="btn btn-secondary btn-sm" type="button" id="btn-copy-envelope-url"><svg class="icon"><use href="#i-copy"/></svg> Copy</button></div>
+          <div class="copy-row"><input id="envelope-passphrase" type="text" readonly><button class="btn btn-secondary btn-sm" type="button" id="btn-copy-envelope-passphrase"><svg class="icon"><use href="#i-key"/></svg> Copy passphrase</button></div>
+        </div>
+        <div class="notice envelope-warning hidden" id="envelope-warning">
+          <strong>Shown once</strong>
+          This passphrase is shown once and never stored. Copy it now and pass it on out-of-band — it cannot be recovered later.
+        </div>
+        <div id="envelope-error" class="form-error hidden"></div>
+        <div class="modal-actions"><button class="btn btn-secondary" data-close-modal type="button">Close</button><button class="btn btn-primary" type="submit" id="btn-envelope-create"><svg class="icon"><use href="#i-lock"/></svg> Create envelope link</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="secret-modal" class="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="secret-title">
+      <div class="modal-head"><div><span class="eyebrow">Encrypted vault</span><h2 id="secret-title">Add secret</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <form id="secret-form">
+        <div class="field-grid">
+          <label class="field"><span>Label</span><input id="secret-label" placeholder="e.g. Discord bot token" required></label>
+          <label class="field"><span>Kind</span><select id="secret-kind"><option value="password">Password</option><option value="api_key">API key</option><option value="note">Secure note</option><option value="ssh_key">SSH key</option><option value="seed_phrase">Seed phrase</option></select></label>
+        </div>
+        <label class="field"><span>Payload (JSON)</span><textarea id="secret-payload" rows="5" placeholder='{"value": "..."}'></textarea></label>
+        <div id="secret-error" class="form-error hidden"></div>
+        <div class="modal-actions"><button class="btn btn-secondary" data-close-modal type="button">Cancel</button><button class="btn btn-primary" type="submit" id="btn-secret-save">Store secret</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="reveal-modal" class="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="reveal-title">
+      <div class="modal-head"><div><span class="eyebrow">Recovery</span><h2 id="reveal-title">Reveal recovery phrase</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <form id="reveal-form">
+        <p class="muted">Confirm your passphrase to decrypt and display the 24-word phrase.</p>
+        <label class="field"><span>Master passphrase</span><input id="reveal-passphrase" type="password" autocomplete="current-password" required></label>
+        <div id="reveal-error" class="form-error hidden"></div>
+        <div id="reveal-result" class="hidden"><div id="reveal-words" class="seed-grid compact"></div></div>
+        <div class="modal-actions"><button class="btn btn-secondary" data-close-modal type="button">Close</button><button class="btn btn-primary" type="submit" id="btn-reveal">Reveal</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="confirm-modal" class="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel modal-small" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div class="modal-head"><div><span class="eyebrow">Confirm</span><h2 id="confirm-title">Are you sure?</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <p id="confirm-message" class="muted"></p>
+      <div class="modal-actions"><button class="btn btn-secondary" data-close-modal type="button">Cancel</button><button class="btn btn-danger" id="btn-confirm-action" type="button">Continue</button></div>
+    </div>
+  </div>
+
+  <div id="diagnostics-modal" class="modal">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="diagnostics-title">
+      <div class="modal-head"><div><span class="eyebrow">System</span><h2 id="diagnostics-title">Diagnostics</h2></div><button class="icon-button" data-close-modal aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <div id="diagnostics-list" class="diagnostic-list"></div>
+      <div class="modal-actions"><button class="btn btn-secondary" id="btn-rerun-diagnostics" type="button"><svg class="icon"><use href="#i-refresh"/></svg> Re-run</button><button class="btn btn-primary" data-close-modal type="button">Done</button></div>
     </div>
   </div>
 
