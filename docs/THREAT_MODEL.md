@@ -98,11 +98,14 @@ Terminology used below:
      states this plainly ("do not use that mode for real data") and that there
      is **no automatic plaintext→encrypted migration** — an already-created
      vault stays plaintext until you rotate data directories.
-  2. Even **with** SQLCipher, the FTS5 search index
-     (`ghostdrive/database/fts.py`) is a *separate, unencrypted, local-only*
-     SQLite database by design (Spec §8.1): file names, paths, and tags sit in
-     plaintext `ghostdrive_search.fts`. It is never synced to backends, but a
-     disk-reading attacker gets the file inventory for free.
+  2. The full-text search index is **not** a separate plaintext file: it is
+     an FTS5 virtual table (`files_fts`) inside the main database, maintained
+     by triggers (`schema.py::CREATE_FTS5`, `fts_after_insert/update/delete`)
+     — so it inherits exactly the DB's protection level (encrypted under
+     SQLCipher, plaintext in the fallback of risk 1). An earlier standalone
+     plaintext index module (`database/fts.py`, hardcoded `test_fts_key`) was
+     dead code and has been removed; production search goes through the main
+     DB (`db.list_files(search=...)`).
 
 **Threat 1.4: Recovering key material from RAM / swap / pagefile while unlocked.**
 - *Mitigation:* The Master Key lives in a ctypes buffer with explicit
@@ -279,8 +282,9 @@ Terminology used below:
 - *Mitigation (confidentiality):* Ransomware that encrypts backend ciphertext
   gains nothing it can read; local/external folder backends hold only
   ciphertext. Nothing readable is stored outside the vault except what the
-  user keeps there (see AD-1.3 — the plaintext FTS index and, without
-  SQLCipher, the plaintext DB are the exceptions on the metadata plane).
+  user keeps there (see AD-1.3 — without SQLCipher, the whole DB including
+  its FTS5 index is the exception on the metadata plane; with SQLCipher,
+  there is no plaintext index).
 - *Mitigation (recoverability):*
   - Erasure-coded + domain-spread shards (`durability.py`, `upload.py`)
   - Encrypted, immutable index snapshots written to one backend per failure
@@ -371,8 +375,8 @@ Terminology used below:
   |  +--------------v--------------+    | |  HTTPS/MTProto/   | TRANSPORT     |
   |  | ghostdrive.db (SQLCipher or |    | |  SSH/SMB -------> | (TLS/MTProto/ |
   |  | plaintext fallback!)        |    | |                   |  SSH per      |
-  |  | + ghostdrive_search.fts     |    | |                   |  backend; NO  |
-  |  | | (ALWAYS plaintext, local) |    | |                   |  pinning here)|
+  |  | + files_fts in main db      |    | |                   |  backend; NO  |
+  |  | | (encrypted with the DB)   |    | |                   |  pinning here)|
   |  +------------------------------+   | |                   +--------------+
   |  | OS keyring: backend creds   |    | | TB1: keys, passphrase and
   |  | (AES-GCM under Master Key)  |    | |      plaintext never cross it

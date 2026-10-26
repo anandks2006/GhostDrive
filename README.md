@@ -15,7 +15,7 @@ by the local app (see [Security Model](#security-model)).
 |---|---|---|
 | Telegram | Cloud | MTProto channel storage via Telethon |
 | Discord | Cloud | Bot-channel storage via discord.py |
-| Local Folder Locker | Local | Encrypted offline vault (always available) |
+| Local Folder Locker | Local | Encrypted offline vault (no network required) |
 | NAS (Network Attached) | Local / LAN | SFTP or SMB/CIFS storage |
 | External Drive | Hardware | Removable USB/external drive registration |
 
@@ -91,9 +91,11 @@ Set `GHOSTDRIVE_DATA_DIR` to use a custom vault/data directory and
 - **SQLCipher (`sqlcipher3`)**: required for database encryption. Without it the
   app runs with an unencrypted index and logs a warning. See
   [`docs/setup_sqlcipher_windows.md`](docs/setup_sqlcipher_windows.md).
-- **FTS search index**: the full-text search index (`ghostdrive_search.fts` —
-  file names, paths, tags) is always plaintext on disk, even with SQLCipher
-  active. It is local-only and never synced to backends. See
+- **FTS search index**: the full-text search index is an FTS5 virtual table
+  (`files_fts`) living **inside the main database**, kept in sync by triggers
+  (`schema.py::CREATE_FTS5`). It is therefore encrypted whenever SQLCipher is
+  active and plaintext only in the same no-SQLCipher fallback as the rest of
+  the index. It is local-only and never synced to backends. See
   [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) (Threat 1.3).
 - **`mlkem` / liboqs**: optional, only for PQ sharing helpers. See
   [`docs/setup_liboqs.md`](docs/setup_liboqs.md).

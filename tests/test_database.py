@@ -10,7 +10,7 @@ Covers:
   - Tombstone lifecycle: tombstone flag + tombstone_at set
   - Quota reservation: reserve, confirm, restore (atomic, double-spending prevention)
   - pending_chunk_locations: startup scan returns pending rows
-  - FTS5: index_file, search, purge_file, rebuild_from_rows
+  - FTS5: files_fts triggers in the main DB (insert/update/delete sync)
   - Dedup: find_chunk_by_dedup_key, increment/decrement ref_count
 """
 
@@ -24,7 +24,6 @@ from pathlib import Path
 import pytest
 
 from ghostdrive.database.db import GhostDriveDB
-from ghostdrive.database.fts import FTSIndex
 from ghostdrive.exceptions import (
     HMACChainError,
 )
@@ -717,64 +716,90 @@ class TestDedupDB:
 
 
 
-# ── FTS5 tests ────────────────────────────────────────────────────────────────
+# ── FTS5 tests (files_fts lives inside the main SQLCipher DB) ─────────────────
 
-class TestFTS:
-    def test_index_and_search(self, tmp_path):
-        fts = FTSIndex(path=tmp_path / "fts.db")
-        with fts:
-            fid = _uuid()
-            fts.index_file(fid, "vacation_photo.jpg", "/photos/2024/", "image/jpeg", "travel beach")
-            results = fts.search("vacation")
-            assert fid in results
+def _insert_test_file(db: GhostDriveDB, name: str, path: str = "/docs/") -> str:
+    """Insert a files row through the public API so triggers fire."""
+    fid = _uuid()
+    now = _now()
+    with db.transaction():
+        db.insert_file({
+            "id": fid,
+            "name": name,
+            "path": path,
+            "size": 10,
+            "mime_type": "text/plain",
+            "tier": "IMPORTANT",
+            "created_at": now,
+            "modified_at": now,
+            "version": 1,
+            "version_of": None,
+            "tombstone": 0,
+            "tombstone_at": None,
+        })
+    return fid
 
-    def test_search_returns_empty_for_no_match(self, tmp_path):
-        fts = FTSIndex(path=tmp_path / "fts.db")
-        with fts:
-            fts.index_file(_uuid(), "document.pdf", "/docs/", "application/pdf", "")
-            assert fts.search("nonexistent_query_xyz") == []
 
-    def test_purge_removes_file(self, tmp_path):
-        fts = FTSIndex(path=tmp_path / "fts.db")
-        with fts:
-            fid = _uuid()
-            fts.index_file(fid, "secret.txt", "/private/", "text/plain", "")
-            assert fid in fts.search("secret")
-            fts.purge_file(fid)
-            assert fid not in fts.search("secret")
+class TestFTS5MainDB:
+    """The search index (files_fts) is a native FTS5 table inside the main
+    database, kept in sync by schema triggers -- encrypted whenever SQLCipher
+    is active. There is no separate plaintext index file."""
 
-    def test_rebuild_from_rows(self, tmp_path):
-        fts = FTSIndex(path=tmp_path / "fts.db")
-        with fts:
-            rows = [
-                {"id": _uuid(), "name": "alpha.txt", "path": "/a/", "mime_type": "text/plain", "tags": ""},
-                {"id": _uuid(), "name": "beta.py",   "path": "/b/", "mime_type": "text/x-python", "tags": "code"},
-            ]
-            count = fts.rebuild_from_rows(rows)
-            assert count == 2
-            assert fts.search("alpha") != []
-            assert fts.search("beta") != []
+    def test_insert_trigger_indexes_file(self, tmp_path):
+        db = _make_db(tmp_path)
+        try:
+            fid = _insert_test_file(db, "vacation_photo.jpg")
+            rows = db._conn.execute(
+                "SELECT file_id FROM files_fts WHERE files_fts MATCH ?",
+                ("vacation",),
+            ).fetchall()
+            assert [r["file_id"] for r in rows] == [fid]
+        finally:
+            db.close()
 
-    def test_search_prefix(self, tmp_path):
-        fts = FTSIndex(path=tmp_path / "fts.db")
-        with fts:
-            fid = _uuid()
-            fts.index_file(fid, "ghostdrive_test.txt", "/home/", "text/plain", "")
-            results = fts.search("ghostdrive*")
-            assert fid in results
+    def test_update_trigger_refreshes_index(self, tmp_path):
+        db = _make_db(tmp_path)
+        try:
+            fid = _insert_test_file(db, "draft_notes.txt")
+            with db.transaction():
+                db._conn.execute(
+                    "UPDATE files SET name = ? WHERE id = ?", ("final_report.txt", fid)
+                )
+            assert db._conn.execute(
+                "SELECT file_id FROM files_fts WHERE files_fts MATCH ?", ("draft",)
+            ).fetchall() == []
+            rows = db._conn.execute(
+                "SELECT file_id FROM files_fts WHERE files_fts MATCH ?", ("final",)
+            ).fetchall()
+            assert [r["file_id"] for r in rows] == [fid]
+        finally:
+            db.close()
 
-    def test_malformed_query_returns_empty(self, tmp_path):
-        fts = FTSIndex(path=tmp_path / "fts.db")
-        with fts:
-            fts.index_file(_uuid(), "file.txt", "/", "text/plain", "")
-            # Malformed FTS5 syntax: unmatched quote
-            result = fts.search('"unclosed')
-            assert result == []
+    def test_delete_trigger_purges_index(self, tmp_path):
+        db = _make_db(tmp_path)
+        try:
+            fid = _insert_test_file(db, "secret.txt", path="/private/")
+            with db.transaction():
+                db._conn.execute("DELETE FROM files WHERE id = ?", (fid,))
+            assert db._conn.execute(
+                "SELECT file_id FROM files_fts WHERE files_fts MATCH ?", ("secret",)
+            ).fetchall() == []
+        finally:
+            db.close()
 
-    def test_database_not_open_raises(self, tmp_path):
-        fts = FTSIndex(path=tmp_path / "fts.db")
-        with pytest.raises(RuntimeError, match="not open"):
-            fts.search("query")
+    def test_index_lives_in_main_db_file(self, tmp_path):
+        """files_fts is part of ghostdrive.db -- no ghostdrive_search.fts is created."""
+        db = _make_db(tmp_path)
+        try:
+            assert (tmp_path / "test.db").exists()
+            assert not (tmp_path / "ghostdrive_search.fts").exists()
+            # The FTS shadow table exists inside the encrypted database.
+            row = db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'files_fts%'"
+            ).fetchall()
+            assert row  # at least the fts5 virtual table itself
+        finally:
+            db.close()
 
 
 class TestSQLCipherSecurity:
