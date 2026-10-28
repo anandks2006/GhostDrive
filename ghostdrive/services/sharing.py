@@ -527,6 +527,7 @@ async def burn_envelope(token: str, db=None, objects=None) -> dict:
                 "ciphertext_destroyed": False}
 
     destroyed = False
+    worm_retained = False
     if objects is None:
         _, objects = await active_backends(connect_remote=False)
     try:
@@ -535,7 +536,19 @@ async def burn_envelope(token: str, db=None, objects=None) -> dict:
             row = db.get_backend(meta["backend_id"])
             if row is not None:
                 obj = build_backend(row)
-        if obj is not None:
+        # WORM (append-only) backends refuse deletion at the application layer:
+        # a burn link hosted there still gets tombstoned below so it can never
+        # be fetched again, but the ciphertext bytes are retained by the
+        # backend's contract. Documented behavior: burn-after-read on a WORM
+        # backend is a logical revocation, not a physical shred.
+        if meta["backend_id"] in files_service.worm_backend_ids(db):
+            worm_retained = True
+            logger.info(
+                "Burn of envelope %s: backend %s is append-only (WORM); "
+                "revoking the link but retaining ciphertext bytes.",
+                token, meta["backend_id"],
+            )
+        elif obj is not None:
             destroyed = bool(await obj.delete(meta["reference_id"]))
         else:
             logger.warning(
@@ -555,6 +568,8 @@ async def burn_envelope(token: str, db=None, objects=None) -> dict:
         entry["burned"] = True
         entry["burned_at"] = _now_iso()
         entry["destroyed"] = destroyed
+        if worm_retained:
+            entry["worm_retained"] = True
         links[token] = entry
         db.set_setting(
             ENVELOPE_SETTINGS_KEY, json.dumps(links, separators=(",", ":"))
