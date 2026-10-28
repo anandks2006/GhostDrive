@@ -1,0 +1,43 @@
+# .dockerignore for the GhostDrive image build.
+#
+# CAVEAT (honest): the compose file builds with context ../.. (the repo root),
+# and Docker loads ignore rules from the CONTEXT ROOT, not from next to the
+# Dockerfile. For these rules to actually apply, either copy this file to the
+# repo root as .dockerignore, or build with BuildKit and name it
+# packaging/docker/Dockerfile.dockerignore (BuildKit honors that path next to
+# the Dockerfile). As shipped, this file documents intent and is enforced only
+# in the second arrangement.
+
+.git
+.gitignore
+.github
+
+tests
+docs
+dist
+build
+installer
+scripts
+
+# Other packaging artifacts are not needed inside the image build.
+packaging
+
+node_modules
+__pycache__
+*.py[cod]
+.venv
+venv
+
+.pytest_cache
+.ruff_cache
+.hypothesis
+.nonces
+.coverage
+
+# Repo-root noise that must never enter the build context.
+*.log
+ghostdrive.log
+Start GhostDrive.bat
+GhostDrive_ProjectSpec_v1.2.txt
+ghostdrive_integration.session
+discord_test.py

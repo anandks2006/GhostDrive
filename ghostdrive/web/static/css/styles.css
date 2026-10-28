@@ -3447,3 +3447,62 @@ select {
 .add-root-row .btn {
   flex: 0 0 auto;
 }
+
+/* ── Tripwires, air-gap, cloud, remote, content search ─────────────── */
+
+/* Duplicated-content bars in the waste report (mirror .bar-item structure). */
+.bar-row {
+  display: grid;
+  gap: 6px;
+}
+
+.bar-row > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+}
+
+.bar-row span {
+  color: var(--muted);
+}
+
+.bar-row strong {
+  color: var(--text);
+  font-weight: 560;
+}
+
+.bar-track {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+
+.bar-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+/* Snippet lines under a content-search hit. */
+.content-snippet {
+  display: block;
+  margin-top: 3px;
+  font-family: ui-monospace, "Cascadia Mono", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+/* Pairing QR image. */
+.remote-qr {
+  width: 176px;
+  height: 176px;
+  border-radius: 12px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  padding: 8px;
+}

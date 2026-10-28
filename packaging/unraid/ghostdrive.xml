@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Container>
+  <Name>GhostDrive</Name>
+  <!-- Replace youruser with whoever publishes the image; build it from
+       packaging/docker/Dockerfile until an official image exists. -->
+  <Repository>ghcr.io/youruser/ghostdrive</Repository>
+  <Tag>latest</Tag>
+  <Registry>https://ghcr.io</Registry>
+  <!-- Bridge networking is deliberate: the image binds 0.0.0.0 inside its own
+       container namespace (via the CLI serve subcommand's host flag, the only
+       host override in the codebase — the server itself hardcodes 127.0.0.1),
+       and the Port mapping below publishes it on the Unraid host. -->
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <WebUI>http://[IP]:[PORT:8000]/</WebUI>
+  <Port>
+    <HostPort>8000</HostPort>
+    <ContainerPort>8000</ContainerPort>
+    <Protocol>tcp</Protocol>
+  </Port>
+  <Path>
+    <Host>/mnt/user/appdata/ghostdrive</Host>
+    <Container>/data</Container>
+    <Mode>rw</Mode>
+  </Path>
+  <Variable>
+    <Name>GHOSTDRIVE_DATA_DIR</Name>
+    <Value>/data</Value>
+    <Required>true</Required>
+  </Variable>
+  <Description>Encrypted, redundant, multi-backend personal cloud drive — self-hosted web vault. Loopback-published by default; see the README before exposing the port.</Description>
+  <Contributor>GhostDrive project</Contributor>
+  <Category>Utilities</Category>
+  <ProjectURL>https://github.com/youruser/ghostdrive</ProjectURL>
+  <SupportURL>https://github.com/youruser/ghostdrive/issues</SupportURL>
+  <Overview><![CDATA[
+    GhostDrive is an encrypted personal cloud drive with a web UI. This
+    container runs the web vault on your Unraid box.
+
+    **Data lives in /mnt/user/appdata/ghostdrive** (mapped to /data in the
+    container). It holds keystore.json (the vault keystore), ghostdrive.db
+    (encrypted metadata), and logs. The keystore is unrecoverable without your
+    24-word seed phrase — write the seed on paper, and do not keep the only
+    copy of it inside the folder you back up.
+
+    **Networking, read this:** the web UI is published on port 8000 of the
+    Unraid host. GhostDrive has no TLS and no auth beyond its own vault lock;
+    keep the port on your trusted LAN or put a reverse proxy / Tailscale in
+    front of it. Do not port-forward it to the internet.
+
+    Status: template maintained, but the image build and this exact template
+    are UNTESTED against a real Unraid box — see the repo's
+    packaging/unraid/README.md for the honest state and limitations.
+  ]]></Overview>
+</Container>

@@ -41,6 +41,14 @@ Storage: the share row lives in ``share_links`` with
 this wave), while the envelope's backend location + canonical header live
 under the settings key ``envelope_links`` (JSON ``{token: {...}}``) because
 share_links has no column for a backend reference.
+
+Burn-after-read (opt-in, ``burn_after_read=True``): the stored ciphertext is
+DESTROYED on the backend after the first completed fetch of the blob route.
+Threat model: this cannot un-screenshot what the first recipient saw — it
+removes the *server-side copy*, so a leaked or forwarded link has no second
+fetch in it.  The settings meta entry is RETAINED and rewritten as burned so
+later lookups can distinguish burned (410 Gone) from unknown (404); burn wins
+over ``max_downloads`` (see :func:`burn_envelope`).
 """
 
 from __future__ import annotations
@@ -189,6 +197,19 @@ def register_download(token: str) -> None:
 
 # Byte-layout constants — keep in sync with receive.js (web/static/js/receive.js).
 ENVELOPE_MAGIC = b"GDSHARE1"
+
+BURNED_MESSAGE = "This link has been burned: it was already viewed once."
+
+
+class EnvelopeBurnedError(PermissionError):
+    """Terminal burn-after-read state: the envelope was already fetched once.
+
+    Subclasses ``PermissionError`` so pre-burn call sites keep treating it as
+    a recipient-access refusal, but routes MUST check for it FIRST and map it
+    to HTTP 410 Gone — a burned link is not merely revoked, it is finished,
+    and "410 + burned" is how a recipient (and receive.js) tells it apart
+    from an expired/revoked (403) or unknown (404) token.
+    """
 ENVELOPE_SETTINGS_KEY = "envelope_links"   # settings JSON: {token: envelope meta}
 ENVELOPE_RECIPIENT_ALIAS = "envelope"      # marker in share_links.recipient_alias
 
@@ -235,6 +256,7 @@ async def create_envelope_link(
     ttl_hours: int = 72,
     max_downloads: int | None = None,
     passphrase: str | None = None,
+    burn_after_read: bool = False,
     db=None,
     objects=None,
     master_key=None,
@@ -247,6 +269,14 @@ async def create_envelope_link(
     (PBKDF2 600k), uploads the contiguous ciphertext to a backend, and records
     a ``share_links`` row so TTL / max_downloads / revocation behave exactly
     like classic links.
+
+    ``burn_after_read`` opts the link into burn-after-read semantics: after
+    the FIRST completed fetch of the ciphertext blob the stored envelope is
+    destroyed on the backend, the meta entry is marked burned, and the share
+    row is revoked — every later access answers 410 Gone.  Burn WINS over
+    ``max_downloads``: even a link created with max_downloads=5 dies after one
+    fetch, because the rationale is "no second fetch exists" (recipient-side
+    screenshot risk is out of our control; server-side re-fetch is not).
 
     ``master_key``/``salt`` are accepted for signature symmetry with the other
     service helpers but deliberately unused: the envelope key is random and
@@ -356,13 +386,18 @@ async def create_envelope_link(
         # share_links has no column for a backend reference, so the envelope
         # location + canonical header live in a settings JSON blob instead.
         links = json.loads(db.get_setting(ENVELOPE_SETTINGS_KEY, "{}") or "{}")
-        links[token] = {
+        entry = {
             "backend_id": str(target_row["id"]),
             "reference_id": reference_id,
             "envelope_size": len(envelope),
             "header": header,
             "created_at": created_at,
         }
+        if burn_after_read:
+            # Opt-in marker read by the blob route: schedule destruction for
+            # after the last byte reaches the recipient.
+            entry["burn"] = True
+        links[token] = entry
         db.set_setting(
             ENVELOPE_SETTINGS_KEY, json.dumps(links, separators=(",", ":"))
         )
@@ -378,6 +413,7 @@ async def create_envelope_link(
         "passphrase": passphrase,    # shown ONCE, out-of-band — never stored
         "expires_at": expires_at,
         "max_downloads": max_downloads,
+        "burn_after_read": burn_after_read,
         "size": len(plaintext),
         "envelope_size": len(envelope),
         "filename": header["filename"],
@@ -386,15 +422,26 @@ async def create_envelope_link(
 
 
 def verify_envelope_access(token: str, db=None, now=None) -> dict:
-    """TTL + max_downloads + revocation checks for an envelope link.
+    """TTL + max_downloads + revocation + burn checks for an envelope link.
 
     Delegates to :func:`open_link` so envelope links raise exactly the same
     errors (FileNotFoundError / PermissionError) and messages as classic
     links, then confirms an envelope is actually recorded for the token.
     ``now`` optionally pins the clock for the expiry check (tests); when
     omitted the wall clock is used, same as ``open_link``.
+
+    Burned links are checked BEFORE ``open_link``: burning also revokes the
+    share row, so checking the row first would misreport a finished link as
+    a merely-revoked 403.  A burned link is terminal and must answer 410 even
+    if it would otherwise be expired or over its download limit.
     """
     db = db or require_db()
+    meta = _load_envelope_meta(db, token)
+    if meta is None:
+        # Classic /s/ token (or unknown token): no envelope behind it.
+        raise FileNotFoundError("Envelope share link not found.")
+    if meta.get("burned"):
+        raise EnvelopeBurnedError(BURNED_MESSAGE)
     row = open_link(token)  # missing / revoked / expired / limit / passcode
     if now is not None and row["expires_at"]:
         try:
@@ -402,10 +449,6 @@ def verify_envelope_access(token: str, db=None, now=None) -> dict:
                 raise PermissionError("This share link has expired.")
         except ValueError:
             logger.warning("Invalid expiry stored for token %s", token)
-    meta = _load_envelope_meta(db, token)
-    if meta is None:
-        # Classic /s/ token (or unknown token): no envelope behind it.
-        raise FileNotFoundError("Envelope share link not found.")
     return {
         "token": token,
         "file_id": row["file_id"],
@@ -446,3 +489,81 @@ async def load_envelope_blob(info: dict, db=None, objects=None) -> bytes:
     if not envelope.startswith(ENVELOPE_MAGIC):
         raise RuntimeError("Stored envelope is corrupt (bad magic).")
     return envelope
+
+
+async def burn_envelope(token: str, db=None, objects=None) -> dict:
+    """Burn an envelope link: destroy the ciphertext, tombstone the link.
+
+    Called by the blob route as a ``BackgroundTask`` AFTER the last byte of
+    the envelope has been handed to the recipient (a completed transfer —
+    TestClient runs it synchronously on response close).  Rationale: burn
+    after read is about removing the *server-side copy* so there is never a
+    second fetch; the recipient-side screenshot/mirror risk is out of our
+    control, but keeping a re-downloadable ciphertext around is not.
+
+    Order matters and is deliberate:
+
+    1. delete the backend object — best-effort; a failed delete is LOGGED
+       but does NOT abort the burn, because leaving a "burned" link able to
+       serve again would defeat the whole feature;
+    2. rewrite the settings meta entry as burned (retained — not deleted —
+       so later lookups distinguish burned (410) from unknown (404), and
+       backend_id/reference_id remain for forensics);
+    3. revoke the share row (belt-and-braces with step 2).
+
+    Burn wins over ``max_downloads``: the route registers this fetch (if it
+    counts at all) before scheduling the burn, and the burned meta check in
+    :func:`verify_envelope_access` runs before the row's limit/revocation
+    checks, so any later access answers 410 regardless of the remaining
+    download budget.  Idempotent: a second burn of an already-burned token
+    reports ``already_burned`` without touching storage again.
+    """
+    db = db or require_db()
+    meta = _load_envelope_meta(db, token)
+    if meta is None:
+        raise FileNotFoundError("Envelope share link not found.")
+    if meta.get("burned"):
+        return {"status": "burned", "token": token, "already_burned": True,
+                "ciphertext_destroyed": False}
+
+    destroyed = False
+    if objects is None:
+        _, objects = await active_backends(connect_remote=False)
+    try:
+        obj = objects.get(meta["backend_id"])
+        if obj is None:
+            row = db.get_backend(meta["backend_id"])
+            if row is not None:
+                obj = build_backend(row)
+        if obj is not None:
+            destroyed = bool(await obj.delete(meta["reference_id"]))
+        else:
+            logger.warning(
+                "Burn of envelope %s: backend %s unavailable; marking burned "
+                "without confirmed ciphertext deletion.",
+                token, meta["backend_id"],
+            )
+    except Exception as exc:
+        logger.warning(
+            "Burn of envelope %s: backend delete failed (%s); marking burned "
+            "anyway so the link cannot be fetched again.", token, exc,
+        )
+
+    with db.transaction():
+        links = json.loads(db.get_setting(ENVELOPE_SETTINGS_KEY, "{}") or "{}")
+        entry = links.get(token) or meta
+        entry["burned"] = True
+        entry["burned_at"] = _now_iso()
+        entry["destroyed"] = destroyed
+        links[token] = entry
+        db.set_setting(
+            ENVELOPE_SETTINGS_KEY, json.dumps(links, separators=(",", ":"))
+        )
+        db.revoke_share_link(token)
+
+    logger.info(
+        "Envelope %s burned after read (ciphertext destroyed=%s)",
+        token, destroyed,
+    )
+    return {"status": "burned", "token": token, "already_burned": False,
+            "ciphertext_destroyed": destroyed}

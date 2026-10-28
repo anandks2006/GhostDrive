@@ -20,6 +20,7 @@ from functools import cmp_to_key
 from typing import Any, Optional
 
 from ghostdrive.pipeline.coding import erasure_parameters
+from ghostdrive.services.files import worm_backend_ids
 
 logger = logging.getLogger("ghostdrive.services.retention")
 
@@ -110,6 +111,10 @@ def prune_stale_locations(db, older_than_days: int = 7, now: datetime | None = N
     * ``orphaned`` rows: the chunk is gone, so its remote objects are handled
       by the file-delete path; here we only drop the index rows and release
       nothing (quota was settled at upload-confirm time).
+
+    WORM note: this sweep never deletes backend objects -- only index rows --
+    so append-only (``append_only``) backends need no special casing here; the
+    remote-delete sweep is ``deduplicate_confirmed_locations`` below.
     """
     utc = _as_utc(now)
     cutoff = (utc - timedelta(days=older_than_days)).isoformat()
@@ -243,10 +248,17 @@ async def deduplicate_confirmed_locations(
     When ``objects`` is None this is an *index-only cleanup*: duplicate rows
     are still removed, but no remote deletes are attempted and no quota is
     released.
+
+    WORM: a losing copy on an append-only (``append_only``) backend is never
+    deleted -- neither its remote bytes nor its index row. Keeping the row
+    means the retained bytes stay addressable, so a later sweep after WORM is
+    toggled off can still find and remove them. The number of such copies is
+    reported as ``skipped_worm``.
     """
     groups_removed = 0
     removed = 0
     quota_released = 0
+    skipped_worm = 0
     errors: list[str] = []
 
     # Read phase: gather duplicate groups and their rows (read-only tx).
@@ -281,6 +293,7 @@ async def deduplicate_confirmed_locations(
 
     # Remote-delete phase: deliberately OUTSIDE any transaction — holding a
     # SQLite write lock across network I/O would stall the whole app.
+    worm = worm_backend_ids(db)
     decisions = []  # (row, release_bytes)
     for chunk_row, _winner, losers in plans:
         k = None
@@ -295,6 +308,12 @@ async def deduplicate_confirmed_locations(
             if objects is None:
                 # Index-only cleanup: no remote delete, no quota release.
                 decisions.append((loser, 0))
+                continue
+            if loser["backend_id"] in worm:
+                # WORM (application-level): a losing copy on an append-only
+                # backend is kept whole -- bytes and index row -- so nothing
+                # is deleted and no quota is released for it here.
+                skipped_worm += 1
                 continue
             backend_obj = objects.get(loser["backend_id"])
             if backend_obj is None:
@@ -343,5 +362,9 @@ async def deduplicate_confirmed_locations(
         "groups": groups_removed,
         "removed": removed,
         "quota_released_bytes": quota_released,
+        # Present only when > 0: tests/test_retention_window.py pins the exact
+        # result shape for non-WORM sweeps, and that file is outside this
+        # change's ownership. Callers should read it as result.get("skipped_worm", 0).
+        **({"skipped_worm": skipped_worm} if skipped_worm else {}),
         "errors": errors,
     }

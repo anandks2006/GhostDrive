@@ -34,12 +34,41 @@ from ghostdrive.web.routes import (
     monitoring,
     sync,
     update,
+    security,
+    search,
+    inheritance,
+    health,
+    ops,
+    airgap,
+    waste,
+    cloud,
+    extension,
 )
 from ghostdrive.services import protection as protection_service
 from ghostdrive.services.alerts import start_alerts_scheduler, stop_alerts_scheduler
 from ghostdrive.services.restore_drills import (
     start_drill_scheduler,
     stop_drill_scheduler,
+)
+from ghostdrive.services.canary import (
+    start_canary_scheduler,
+    stop_canary_scheduler,
+)
+from ghostdrive.services.mass_alarm import (
+    start_mass_alarm_scheduler,
+    stop_mass_alarm_scheduler,
+)
+from ghostdrive.services.inheritance import (
+    start_inheritance_scheduler,
+    stop_inheritance_scheduler,
+)
+from ghostdrive.services.health_report import (
+    start_health_report_scheduler,
+    stop_health_report_scheduler,
+)
+from ghostdrive.services.airgap import (
+    start_airgap_scheduler,
+    stop_airgap_scheduler,
 )
 from ghostdrive.utils.log_sanitizer import SanitizedFormatter
 
@@ -63,13 +92,24 @@ from contextlib import asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("GhostDrive Web Server started.")
     protection_service.start_watcher()
-    # Both schedulers are double-start no-ops and tolerate a locked vault.
+    # All schedulers are double-start no-ops and tolerate a locked vault;
+    # each honors its own enabled setting every cycle.
     start_drill_scheduler()
     start_alerts_scheduler()
+    start_canary_scheduler()
+    start_mass_alarm_scheduler()
+    start_inheritance_scheduler()
+    start_health_report_scheduler()
+    start_airgap_scheduler()
     yield
     logger.info("GhostDrive Web Server shutting down...")
     stop_drill_scheduler()
     stop_alerts_scheduler()
+    stop_canary_scheduler()
+    stop_mass_alarm_scheduler()
+    stop_inheritance_scheduler()
+    stop_health_report_scheduler()
+    stop_airgap_scheduler()
     protection_service.stop_watcher()
     state.clean_shutdown()
 
@@ -100,6 +140,17 @@ app.include_router(portable.router)
 app.include_router(monitoring.router)
 app.include_router(sync.router)
 app.include_router(update.router)
+app.include_router(security.router)
+app.include_router(search.router)
+app.include_router(inheritance.router)
+app.include_router(health.router)
+app.include_router(ops.pairing_router)
+app.include_router(ops.remote_router)
+app.include_router(ops.metrics_router)
+app.include_router(airgap.router)
+app.include_router(waste.router)
+app.include_router(cloud.router)
+app.include_router(extension.router)
 
 # Mount Static Assets
 static_dir = Path(__file__).parent / "static"

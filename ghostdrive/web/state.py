@@ -93,6 +93,16 @@ class GlobalState:
             self.km.lock()
             self.km = None
 
+        # 2b. Drop the decrypt-at-query-time search cache: it holds plaintext
+        #     extracted from vault files and must not outlive the unlocked
+        #     session (lock, shutdown, and factory reset all land here).
+        try:
+            from ghostdrive.services.content_search import clear_search_cache
+
+            clear_search_cache()
+        except Exception as exc:
+            logger.debug("search cache clear skipped: %s", exc)
+
         # 3. Cancel background scrub/heal helpers
         for task in list(self.background_tasks):
             try:

@@ -22,6 +22,17 @@ adds an *opt-in* checker with three safety properties:
   self-replacement of the running exe is deliberately NOT implemented —
   Windows cannot overwrite a running image — ``launch_installer`` only
   reports readiness.
+* Signed releases (opt-in via ``GHOSTDRIVE_RELEASE_PUBKEY``). The sha256
+  checks above prove the bytes match the hash the *feed* served — a
+  compromised feed can serve a matching hash for malicious bytes. When the
+  env var points at a PEM-encoded Ed25519 public key, a staged download
+  must additionally be accompanied by a detached ``.sig`` JSON document
+  (``{"algo": "ed25519", "sig": <b64>, "pubkey_sha256": <hex>}``) that
+  verifies against that key; any failure raises ``SignatureError`` and the
+  partial file is deleted. With the env var unset (the default today) the
+  behaviour is exactly the sha256-only path it always was. This is
+  deliberately OPT-IN today and will be enforced by default once release-
+  key distribution is established — see ``docs/REPRODUCIBLE_BUILDS.md``.
 
 Two feed shapes are accepted (plain JSON, no SDK):
 
@@ -34,7 +45,9 @@ Two feed shapes are accepted (plain JSON, no SDK):
   ``{"version": ..., "url": ..., "sha256": ..., "notes": ...}``
   (``published_at`` optional).
 
-Zero new dependencies: stdlib ``urllib``, ``hashlib``, ``hmac``, ``json``.
+The feed checker itself needs nothing beyond stdlib ``urllib``,
+``hashlib``, ``hmac``, ``json``; the optional signature check adds
+``cryptography`` (already a core dependency of the crypto stack).
 Every failure mode (network, bad JSON, unexpected shape, garbage version)
 becomes ``{"status": "error", "detail": ...}`` — the check must never
 break the app.
@@ -43,6 +56,8 @@ break the app.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -55,6 +70,10 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 logger = logging.getLogger("ghostdrive.platform.updater")
 
@@ -549,6 +568,198 @@ def status(db=None) -> dict:
     }
 
 
+# ── Release signatures (Ed25519, opt-in) ────────────────────────────────────
+#
+# WHY: the sha256 checks in this module only prove that the bytes match
+# whatever hash the feed served — a compromised or hostile feed can supply a
+# matching hash for malicious bytes. A detached Ed25519 signature binds the
+# artifact to the release key, which lives on an offline signing machine
+# (scripts/keygen_release_key.py, scripts/release.py; operator doc:
+# docs/REPRODUCIBLE_BUILDS.md).
+#
+# Trust is switched on by pointing the GHOSTDRIVE_RELEASE_PUBKEY env var at
+# a PEM public key file. Env var, not a settings key: update verification
+# must work before (and without) an unlocked vault, and an operator
+# packaging GhostDrive can set it system-wide for every user of the machine.
+
+# Path to the trusted PEM public key. Unset (the default) means "sha256
+# only" — byte-for-byte the pre-signing behaviour.
+RELEASE_PUBKEY_ENV = "GHOSTDRIVE_RELEASE_PUBKEY"
+
+# The only algorithm accepted. A future rotation scheme may add more;
+# unknown values are refused, never ignored.
+SIG_ALGO = "ed25519"
+_SIG_RAW_LEN = 64  # Ed25519 signatures are exactly 64 bytes
+_SIG_FILE_SUFFIX = ".sig"  # detached metadata lives next to the artifact URL
+
+
+class SignatureError(RuntimeError):
+    """A release failed Ed25519 signature verification.
+
+    Subclasses RuntimeError so existing callers that treat update failures
+    as runtime errors (web/routes/update.py::_http_error) keep working — a
+    failed verification surfaces as an aborted download, never as a staged
+    installer.
+    """
+
+
+def _load_ed25519_public_key(public_key_pem: bytes) -> Ed25519PublicKey:
+    """Load a PEM public key; raise SignatureError for anything untrusted."""
+    try:
+        key = serialization.load_pem_public_key(public_key_pem)
+    except (ValueError, TypeError) as exc:
+        raise SignatureError(f"unusable release public key: {exc}") from exc
+    if not isinstance(key, Ed25519PublicKey):
+        raise SignatureError("release public key is not Ed25519")
+    return key
+
+
+def release_pubkey_sha256_hex(public_key_pem: bytes) -> str:
+    """Lower-case hex sha256 over the raw 32 bytes of the Ed25519 key.
+
+    This is the value carried in ``.sig`` documents as ``pubkey_sha256``
+    and the thing to compare out-of-band when the key is first distributed.
+    """
+    raw = _load_ed25519_public_key(public_key_pem).public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return hashlib.sha256(raw).hexdigest()
+
+
+def release_pubkey_fingerprint(public_key_pem: bytes) -> str:
+    """Display form of :func:`release_pubkey_sha256_hex` — colon-grouped hex."""
+    digest = release_pubkey_sha256_hex(public_key_pem)
+    return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
+
+
+def verify_release_signature(
+    artifact_bytes: bytes,
+    sig_meta: dict,
+    public_key_pem: bytes,
+) -> None:
+    """Verify a detached Ed25519 release signature over ``artifact_bytes``.
+
+    ``sig_meta`` is the decoded ``.sig`` JSON document produced by
+    ``scripts/release.py``::
+
+        {"algo": "ed25519",
+         "sig": "<base64 of the raw 64-byte signature>",
+         "pubkey_sha256": "<hex sha256 of the raw 32-byte public key>",
+         # optional, informational only:
+         "artifact": "<filename>", "sha256": "<hex>"}
+
+    Checks, in order: algorithm is ``ed25519``; ``pubkey_sha256`` matches
+    the provided trusted key (the key-rotation guard — a signature made by
+    a *different* key fails here, before any crypto); the base64 decodes
+    to exactly 64 bytes; and ``Ed25519PublicKey.verify`` accepts the
+    signature over the exact artifact bytes.
+
+    Returns None on success.
+
+    Raises:
+        SignatureError: on any mismatch or malformed input. Callers that
+            are staging a download must treat this as fatal — delete the
+            partial file and abort the update.
+    """
+    if not isinstance(sig_meta, dict):
+        raise SignatureError("signature metadata is not a JSON object")
+    algo = str(sig_meta.get("algo") or "").strip().lower()
+    if algo != SIG_ALGO:
+        raise SignatureError(f"unsupported signature algorithm: {algo!r}")
+    claimed = str(sig_meta.get("pubkey_sha256") or "").strip().lower()
+    if claimed != release_pubkey_sha256_hex(public_key_pem):
+        # Key-rotation guard: the signature was made by a key other than
+        # the one we were told to trust. Fail before the crypto step.
+        raise SignatureError("release signing key mismatch (different key)")
+    try:
+        signature = base64.b64decode(str(sig_meta.get("sig") or ""), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise SignatureError(f"signature is not valid base64: {exc}") from exc
+    if len(signature) != _SIG_RAW_LEN:
+        raise SignatureError(
+            f"signature must be {_SIG_RAW_LEN} raw Ed25519 bytes, got {len(signature)}"
+        )
+    try:
+        _load_ed25519_public_key(public_key_pem).verify(signature, artifact_bytes)
+    except InvalidSignature as exc:
+        raise SignatureError(
+            "release signature does not match the artifact"
+        ) from exc
+
+
+def verify_release_signature_file(
+    artifact_path: Path,
+    sig_path: Path,
+    public_key_pem: bytes,
+) -> None:
+    """Path-based wrapper around :func:`verify_release_signature`.
+
+    Reads the artifact bytes and the ``.sig`` JSON document from disk and
+    verifies them against ``public_key_pem``. Same failure contract: raises
+    SignatureError on anything wrong, returns None on success.
+    """
+    sig_path = Path(sig_path)
+    try:
+        meta = json.loads(sig_path.read_bytes())
+    except FileNotFoundError as exc:
+        raise SignatureError(f"signature file not found: {sig_path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SignatureError(f"unreadable signature file {sig_path}: {exc}") from exc
+    verify_release_signature(Path(artifact_path).read_bytes(), meta, public_key_pem)
+
+
+def _load_release_pubkey_from_env() -> Optional[bytes]:
+    """Trusted public key from ``GHOSTDRIVE_RELEASE_PUBKEY``, or None.
+
+    None means "signature checking off" (env unset — the default, and the
+    legacy sha256-only path). The env var being *set* is the operator's
+    explicit intent to verify, so a key file that exists but cannot be read
+    raises SignatureError rather than silently downgrading to sha256-only:
+    a typo in the key path must never disable verification.
+    """
+    raw = os.environ.get(RELEASE_PUBKEY_ENV, "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    try:
+        pem = path.read_bytes()
+    except OSError as exc:
+        raise SignatureError(
+            f"{RELEASE_PUBKEY_ENV} points at {path} but it cannot be read: {exc}"
+        ) from exc
+    return pem
+
+
+def _fetch_sig_meta(
+    url: str,
+    fetch: Optional[Callable[[str], bytes]] = None,
+) -> Optional[dict]:
+    """Fetch ``<url>.sig`` alongside the download; None when it is absent.
+
+    A *missing* .sig (network error, 404) returns None so the caller can
+    fall back to the sha256-only path with a loud warning. A .sig that is
+    fetched but is not a JSON object raises SignatureError: a present-but-
+    unusable signature is tampering, not absence.
+    """
+    sig_url = url + _SIG_FILE_SUFFIX
+    try:
+        raw = fetch(sig_url) if fetch is not None else _urllib_fetch(sig_url)
+    except Exception as exc:
+        logger.debug("No signature accompanies the download (%s)", exc)
+        return None
+    try:
+        meta = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SignatureError(
+            f"malformed signature document at {sig_url}: {exc}"
+        ) from exc
+    if not isinstance(meta, dict):
+        raise SignatureError(
+            f"malformed signature metadata at {sig_url}: not a JSON object"
+        )
+    return meta
+
+
 # ── Download staging ────────────────────────────────────────────────────────
 
 def stage_download(
@@ -556,12 +767,23 @@ def stage_download(
     expected_sha256: str,
     dest_dir: Path,
     fetch: Optional[Callable[[str], bytes]] = None,
+    *,
+    sig_meta: Optional[dict] = None,
 ) -> dict:
     """Download the installer to ``dest_dir`` and verify it against sha256.
 
     Streams into ``GhostDrive-update.exe.part`` while hashing, renames to
     ``GhostDrive-update.exe`` only on a match, and deletes the partial file
     on any mismatch — an unverified installer never survives on disk.
+
+    When the ``GHOSTDRIVE_RELEASE_PUBKEY`` env var points at a trusted
+    PEM public key, the sha256 check is followed by an Ed25519 signature
+    check (:func:`verify_release_signature`); failure raises
+    SignatureError, deletes the partial file, and aborts the update. With
+    the env var unset (the default today) this function behaves exactly as
+    it always has — sha256 only. Signature checking is OPT-IN today and
+    will be enforced by default once release-key distribution is
+    established (docs/REPRODUCIBLE_BUILDS.md).
 
     Args:
         url: where to fetch the installer from.
@@ -571,6 +793,11 @@ def stage_download(
         fetch: injectable sync ``(url) -> bytes`` for tests; the default
             streams from urllib in 1 MiB chunks so a large installer is
             never held in memory.
+        sig_meta: optional pre-fetched ``.sig`` JSON document (shape in
+            :func:`verify_release_signature`). Only honoured when
+            ``GHOSTDRIVE_RELEASE_PUBKEY`` is set; when it is None and the
+            env var is set, ``<url>.sig`` is fetched alongside the
+            installer using the same ``fetch`` mechanism.
 
     Returns:
         ``{"path", "sha256", "size"}`` with path as a string.
@@ -578,6 +805,10 @@ def stage_download(
     Raises:
         RuntimeError: missing/invalid expected checksum, download failure,
             or checksum mismatch (the partial file is removed first).
+        SignatureError: GHOSTDRIVE_RELEASE_PUBKEY is set and either the
+            env var points at an unreadable key file, a present ``.sig``
+            document is malformed, or the signature does not verify —
+            the partial file is removed first.
     """
     expected = _normalize_sha(expected_sha256)
     if expected is None:
@@ -626,6 +857,32 @@ def stage_download(
     if not hmac.compare_digest(actual, expected):
         part.unlink(missing_ok=True)  # never leave an unverified installer
         raise RuntimeError("checksum mismatch")
+
+    # Ed25519 release signature — OPT-IN via GHOSTDRIVE_RELEASE_PUBKEY.
+    # The sha256 above only proves the bytes match the hash the feed
+    # served; the signature binds them to the offline release key. The
+    # env var being unset (the default) means exactly the sha256-only
+    # behaviour above; enforcement by default follows once release-key
+    # distribution is established (docs/REPRODUCIBLE_BUILDS.md).
+    try:
+        pubkey_pem = _load_release_pubkey_from_env()
+        if pubkey_pem is not None:
+            meta = sig_meta if sig_meta is not None else _fetch_sig_meta(url, fetch)
+            if meta is None:
+                # No .sig accompanies this download: fall through on the
+                # sha256-only path (the pre-signing behaviour) — but loudly:
+                # an operator who configured a trusted key should also be
+                # publishing signatures next to the artifacts.
+                logger.warning(
+                    "GHOSTDRIVE_RELEASE_PUBKEY is set but no %s accompanies %s — "
+                    "accepting the download on sha256 alone",
+                    _SIG_FILE_SUFFIX, url,
+                )
+            else:
+                verify_release_signature(part.read_bytes(), meta, pubkey_pem)
+    except SignatureError:
+        part.unlink(missing_ok=True)  # never leave an unverified installer
+        raise
 
     final.unlink(missing_ok=True)  # replace any previously staged download
     part.rename(final)

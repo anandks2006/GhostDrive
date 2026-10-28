@@ -89,7 +89,7 @@ Notes:
 - `-p no:cacheprovider` disables writing `.pytest_cache` (keeps concurrent
   agents/sessions from tripping over each other's cache).
 - Expected runtime: **~1–2 minutes** for the full suite on a developer
-  machine (currently ~722 tests).
+  machine (currently ~909 tests).
 
 ## 3. Markers and collection
 

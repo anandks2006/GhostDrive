@@ -194,6 +194,12 @@
         <button class="nav-item" data-view="vault"><svg class="icon"><use href="#i-key"/></svg><span>Vault &amp; secrets</span></button>
         <button class="nav-item" data-view="recovery"><svg class="icon"><use href="#i-archive"/></svg><span>Recovery kit</span></button>
         <button class="nav-item" data-view="telemetry"><svg class="icon"><use href="#i-activity"/></svg><span>Telemetry</span></button>
+
+        <span class="nav-label">Protection</span>
+        <button class="nav-item" data-view="security"><svg class="icon"><use href="#i-shield"/></svg><span>Tripwires</span></button>
+        <button class="nav-item" data-view="airgap"><svg class="icon"><use href="#i-download"/></svg><span>Air-gap &amp; waste</span></button>
+        <button class="nav-item" data-view="cloud"><svg class="icon"><use href="#i-server"/></svg><span>Cloud import</span></button>
+        <button class="nav-item" data-view="remote"><svg class="icon"><use href="#i-activity"/></svg><span>Remote access</span></button>
         <button class="nav-item" data-view="settings"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span></button>
       </nav>
 
@@ -244,6 +250,20 @@
             <span class="drop-icon"><svg class="icon"><use href="#i-upload"/></svg></span>
             <div><strong>Drop files to encrypt and distribute</strong><span>or choose files from your device</span></div>
             <button class="btn btn-secondary btn-sm" id="btn-browse-files" type="button">Browse</button>
+          </div>
+
+          <div class="panel">
+            <div class="panel-heading">
+              <div><h3>Content search</h3><p>Decrypts files at query time, in memory. Nothing is indexed on disk and nothing leaves this machine.</p></div>
+              <span id="content-cache-pill" class="pill">0 cached</span>
+            </div>
+            <div class="protection-form">
+              <label class="field"><span>Search inside files</span><input id="content-search-input" type="search" placeholder="passphrase recovery seed warranty…" autocomplete="off"></label>
+              <button class="btn btn-primary btn-sm" id="btn-content-search" type="button"><svg class="icon"><use href="#i-files"/></svg> Search content</button>
+            </div>
+            <div id="content-search-error" class="form-error hidden" style="margin:0 20px"></div>
+            <div id="content-search-results" class="event-feed"></div>
+            <div id="content-search-empty" class="empty-state small hidden"><p>Type a query to search inside decrypted file contents.</p></div>
           </div>
 
           <div class="panel table-panel">
@@ -423,6 +443,7 @@
           <div class="page-head">
             <div><span class="eyebrow">Automation</span><h2>Sync &amp; versions</h2><p>Auto-vault any number of local folders and keep a full version chain.</p></div>
             <div class="head-actions">
+              <button class="btn btn-secondary" id="btn-sync-quick-add" type="button" title="One click to auto-vault your Downloads folder"><svg class="icon"><use href="#i-download"/></svg> Vault Downloads</button>
               <button class="btn btn-secondary" id="btn-sync-start" type="button">Start</button>
               <button class="btn btn-secondary" id="btn-sync-stop" type="button">Stop</button>
               <button class="btn btn-primary" id="btn-sync-run" type="button"><svg class="icon"><use href="#i-refresh"/></svg> Run now</button>
@@ -554,6 +575,31 @@
             <div class="panel-heading"><div><h3>Active alerts</h3><p>Evaluated continuously — dismiss what you have handled.</p></div></div>
             <div id="alerts-list"></div>
           </div>
+          <div class="panel form-panel">
+            <div class="panel-heading">
+              <div><h3>Weekly health report</h3><p id="health-report-note">Drills, badge, alerts, and space — one summary on a schedule.</p></div>
+              <span id="health-report-pill" class="pill durability-state">…</span>
+            </div>
+            <div class="state-list">
+              <div><span>Last run</span><strong id="health-report-last">Never</strong></div>
+              <div><span>Badge</span><strong id="health-report-badge">—</strong></div>
+              <div><span>Active alerts</span><strong id="health-report-alerts">—</strong></div>
+              <div><span>Reclaimable</span><strong id="health-report-waste">—</strong></div>
+              <div><span>Webhook</span><strong id="health-report-webhook">Not set</strong></div>
+            </div>
+            <div class="divider"></div>
+            <form id="health-report-form" class="settings-form">
+              <div class="field-grid">
+                <label class="field"><span>Interval (hours)</span><input id="health-report-interval-input" type="number" min="1" value="168"></label>
+                <label class="setting-row"><div><strong>Enabled</strong><span>Build on the scheduler.</span></div><span class="switch"><input type="checkbox" id="health-report-enabled-input" checked><i></i></span></label>
+              </div>
+              <label class="field"><span>Webhook URL (optional)</span><input id="health-report-webhook-input" type="url" placeholder="https://hooks.example.com/…"></label>
+              <div class="form-actions">
+                <button class="btn btn-secondary btn-sm" type="button" id="btn-health-report-save">Save</button>
+                <button class="btn btn-primary btn-sm" type="button" id="btn-health-report-run"><svg class="icon"><use href="#i-activity"/></svg> Run report now</button>
+              </div>
+            </form>
+          </div>
         </section>
 
         <section id="view-smart" class="view">
@@ -674,6 +720,35 @@
               </form>
             </div>
           </div>
+          <div class="panel form-panel">
+            <div class="panel-heading">
+              <div><h3>Inheritance switch (dead man's switch)</h3><p>If you stop checking in, a sealed emergency package is released to your contacts. Shamir shares of the master key, sealed under a release passphrase you choose.</p></div>
+              <span id="inheritance-pill" class="pill durability-state">OFF</span>
+            </div>
+            <div class="state-list">
+              <div><span>Check-in interval</span><strong id="inheritance-interval">—</strong></div>
+              <div><span>Last check-in</span><strong id="inheritance-last-checkin">Never</strong></div>
+              <div><span>Due at</span><strong id="inheritance-due">—</strong></div>
+              <div><span>Days remaining</span><strong id="inheritance-remaining">—</strong></div>
+              <div><span>Package</span><strong id="inheritance-package">Not sealed</strong></div>
+            </div>
+            <div class="divider"></div>
+            <form id="inheritance-form" class="settings-form">
+              <span class="eyebrow form-eyebrow">Setup</span>
+              <div class="field-grid">
+                <label class="field"><span>Check-in interval (days, min 7)</span><input id="inheritance-days-input" type="number" min="7" value="90"></label>
+                <label class="field"><span>Release passphrase (min 12 chars)</span><input id="inheritance-passphrase-input" type="password" autocomplete="new-password" placeholder="Shared with contacts out-of-band"></label>
+              </div>
+              <label class="field"><span>Contact webhooks — one per line, "Name | https://…"</span><textarea id="inheritance-contacts-input" rows="3" placeholder="Sister | https://discord.com/api/webhooks/…"></textarea></label>
+              <div id="inheritance-error" class="form-error hidden"></div>
+              <div class="form-actions">
+                <button class="btn btn-primary btn-sm" type="button" id="btn-inheritance-enable"><svg class="icon"><use href="#i-lock"/></svg> Seal &amp; enable</button>
+                <button class="btn btn-secondary btn-sm" type="button" id="btn-inheritance-checkin">Check in now</button>
+                <button class="btn btn-secondary btn-sm" type="button" id="btn-inheritance-disable">Disable</button>
+              </div>
+            </form>
+            <p class="muted form-note">The package is sealed under the release passphrase — never stored in plaintext. Contacts receive it via webhook (Discord-shaped JSON) only after the deadline passes with no check-in. This is application-level: a machine attacker with disk access bypasses it.</p>
+          </div>
         </section>
 
         <section id="view-shares" class="view">
@@ -706,6 +781,195 @@
             <div class="table-scroll">
               <table class="data-table"><thead><tr><th>Name</th><th class="hide-sm">Tier</th><th class="hide-md">Deleted</th><th class="hide-sm">Size</th><th class="th-actions"></th></tr></thead><tbody id="trash-body"></tbody></table>
               <div id="trash-empty" class="empty-state hidden"><span class="empty-icon"><svg class="icon"><use href="#i-trash"/></svg></span><h3>Trash is empty</h3><p>Deleted files will appear here.</p></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-security" class="view">
+          <div class="page-head">
+            <div><span class="eyebrow">Protection</span><h2>Tripwires</h2><p>Decoy canaries and mass-change alarms — early ransomware and hostile-cleanup detectors.</p></div>
+            <div class="head-actions">
+              <button class="btn btn-secondary" id="btn-canary-check" type="button"><svg class="icon"><use href="#i-activity"/></svg> Check now</button>
+              <button class="btn btn-primary" id="btn-mass-check" type="button"><svg class="icon"><use href="#i-shield"/></svg> Scan changes</button>
+            </div>
+          </div>
+          <div class="split-grid">
+            <div class="panel form-panel">
+              <div class="panel-heading">
+                <div><h3>Canary tripwire</h3><p>Decoy files in your folders. Any change or deletion fires a critical alert.</p></div>
+                <span id="canary-pill" class="pill durability-state">OFF</span>
+              </div>
+              <div class="state-list">
+                <div><span>Canaries</span><strong id="canary-count">0</strong></div>
+                <div><span>Check interval</span><strong id="canary-interval">—</strong></div>
+                <div><span>Missing files</span><strong id="canary-missing">0</strong></div>
+              </div>
+              <div class="divider"></div>
+              <form id="canary-form" class="settings-form">
+                <span class="eyebrow form-eyebrow">Add a canary</span>
+                <label class="field"><span>Full file path</span><input id="canary-path-input" type="text" placeholder="C:\Users\You\Documents\insurance-passwords.txt" autocomplete="off"></label>
+                <div class="form-actions">
+                  <label class="setting-row"><div><strong>Enabled</strong><span>Watch canaries on the scheduler.</span></div><span class="switch"><input type="checkbox" id="canary-enabled-input"><i></i></span></label>
+                  <button class="btn btn-primary btn-sm" type="submit" id="btn-canary-add"><svg class="icon"><use href="#i-plus"/></svg> Plant canary</button>
+                </div>
+                <div id="canary-error" class="form-error hidden"></div>
+              </form>
+              <div class="divider"></div>
+              <div id="canary-list" class="sync-roots-list"><p class="muted sync-roots-empty">No canaries planted yet.</p></div>
+            </div>
+            <div class="panel form-panel">
+              <div class="panel-heading">
+                <div><h3>Mass-change alarm</h3><p>Rates file changes in watched folders. A burst beyond the threshold is what ransomware looks like.</p></div>
+                <span id="mass-pill" class="pill durability-state">ON</span>
+              </div>
+              <div class="state-list">
+                <div><span>Threshold</span><strong id="mass-threshold">—</strong></div>
+                <div><span>Window</span><strong id="mass-window">—</strong></div>
+                <div><span>Last scan</span><strong id="mass-last">Never</strong></div>
+                <div><span>Changes found</span><strong id="mass-count">—</strong></div>
+              </div>
+              <div class="divider"></div>
+              <form id="mass-form" class="settings-form">
+                <span class="eyebrow form-eyebrow">Settings</span>
+                <div class="field-grid">
+                  <label class="field"><span>Files (threshold)</span><input id="mass-threshold-input" type="number" min="1" value="50"></label>
+                  <label class="field"><span>Window (minutes)</span><input id="mass-window-input" type="number" min="1" max="1440" value="5"></label>
+                </div>
+                <label class="setting-row"><div><strong>Enabled</strong><span>Scan on the scheduler and alert on bursts.</span></div><span class="switch"><input type="checkbox" id="mass-enabled-input" checked><i></i></span></label>
+                <div id="mass-error" class="form-error hidden"></div>
+                <button class="btn btn-primary btn-block" type="submit" id="btn-mass-save">Save settings</button>
+              </form>
+              <p class="muted form-note">Mass alarms watch auto-vault folders. A burst also snapshots the index so you can see what changed.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-airgap" class="view">
+          <div class="page-head">
+            <div><span class="eyebrow">Protection</span><h2>Air-gap &amp; waste</h2><p>Encrypted exports to the drive in the drawer, plus what your vault is wasting.</p></div>
+            <div class="head-actions">
+              <button class="btn btn-secondary" id="btn-airgap-verify" type="button"><svg class="icon"><use href="#i-shield"/></svg> Verify export</button>
+              <button class="btn btn-primary" id="btn-airgap-export" type="button"><svg class="icon"><use href="#i-download"/></svg> Export now</button>
+            </div>
+          </div>
+          <div class="split-grid">
+            <div class="panel form-panel">
+              <div class="panel-heading">
+                <div><h3>Air-gap export</h3><p>Copy chunks and a signed manifest to an external drive. Restore drills run from the export itself.</p></div>
+                <span id="airgap-pill" class="pill durability-state">OFF</span>
+              </div>
+              <div class="state-list">
+                <div><span>Target drive</span><strong id="airgap-target">Not set</strong></div>
+                <div><span>Interval</span><strong id="airgap-interval">—</strong></div>
+                <div><span>Last export</span><strong id="airgap-last">Never</strong></div>
+                <div><span>Last drill</span><strong id="airgap-drill">Never</strong></div>
+              </div>
+              <div class="divider"></div>
+              <form id="airgap-form" class="settings-form">
+                <span class="eyebrow form-eyebrow">Settings</span>
+                <label class="field"><span>Export folder (external drive)</span><input id="airgap-target-input" type="text" placeholder="E:\GhostDriveBackup" autocomplete="off"></label>
+                <div class="field-grid">
+                  <label class="field"><span>Interval (hours)</span><input id="airgap-interval-input" type="number" min="1" value="168"></label>
+                  <label class="setting-row"><div><strong>Enabled</strong><span>Export on the scheduler.</span></div><span class="switch"><input type="checkbox" id="airgap-enabled-input"><i></i></span></label>
+                </div>
+                <div id="airgap-error" class="form-error hidden"></div>
+                <button class="btn btn-primary btn-block" type="submit" id="btn-airgap-save">Save settings</button>
+              </form>
+              <div class="divider"></div>
+              <button class="btn btn-secondary btn-block" id="btn-airgap-drill" type="button"><svg class="icon"><use href="#i-activity"/></svg> Run restore drill from export</button>
+            </div>
+            <div class="panel">
+              <div class="panel-heading">
+                <div><h3>Waste report</h3><p id="waste-note">Dedup, trash, and old versions — the bytes you could reclaim.</p></div>
+                <button class="icon-button" id="btn-waste-refresh" title="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
+              </div>
+              <div class="metric-grid four compact-grid">
+                <div class="panel metric"><span>Reclaimable</span><strong id="waste-reclaimable">—</strong><small>upper bound</small></div>
+                <div class="panel metric"><span>Dedup waste</span><strong id="waste-dedup">—</strong><small>redundant copies</small></div>
+                <div class="panel metric"><span>Trash</span><strong id="waste-trash">—</strong><small>pending purge</small></div>
+                <div class="panel metric"><span>Versions</span><strong id="waste-versions">—</strong><small>superseded</small></div>
+              </div>
+              <div class="panel-heading"><div><h3>Top duplicates</h3><p>Identical content stored more than once.</p></div></div>
+              <div id="waste-duplicates" class="bar-list"><p class="muted">No duplicated content detected.</p></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-cloud" class="view">
+          <div class="page-head">
+            <div><span class="eyebrow">Protection</span><h2>Cloud import</h2><p>Pull files from Dropbox, Google Drive, or OneDrive through the encrypting pipeline. Bring your own access token.</p></div>
+            <button class="icon-button" id="btn-cloud-refresh" title="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
+          </div>
+          <div class="split-grid">
+            <div class="panel form-panel">
+              <div class="panel-heading"><div><h3>Connections</h3><p>Tokens stay on this machine, in the OS credential store.</p></div></div>
+              <div id="cloud-connections"><p class="muted">Loading…</p></div>
+              <div class="divider"></div>
+              <form id="cloud-connect-form" class="settings-form">
+                <span class="eyebrow form-eyebrow">Connect a provider</span>
+                <div class="field-grid">
+                  <label class="field"><span>Provider</span><select id="cloud-provider-input"><option value="dropbox">Dropbox</option><option value="gdrive">Google Drive</option><option value="onedrive">OneDrive</option></select></label>
+                  <label class="field"><span>Access token</span><input id="cloud-token-input" type="password" autocomplete="off" placeholder="Paste a provider access token"></label>
+                </div>
+                <div id="cloud-error" class="form-error hidden"></div>
+                <button class="btn btn-primary btn-block" type="submit" id="btn-cloud-connect"><svg class="icon"><use href="#i-link"/></svg> Validate &amp; connect</button>
+                <p class="muted form-note">GhostDrive never sees your cloud password — OAuth desktop flows are deliberately not automated. The token is used only for the provider's API.</p>
+              </form>
+            </div>
+            <div class="panel">
+              <div class="panel-heading">
+                <div><h3>Remote files</h3><p id="cloud-list-note">Select a connected provider to browse its files.</p></div>
+              </div>
+              <div class="protection-form">
+                <label class="field"><span>Provider</span><select id="cloud-browse-provider"><option value="">Not connected</option></select></label>
+                <button class="btn btn-secondary btn-sm" id="btn-cloud-list" type="button">List files</button>
+                <button class="btn btn-primary btn-sm" id="btn-cloud-import" type="button"><svg class="icon"><use href="#i-download"/></svg> Import selected</button>
+              </div>
+              <div id="cloud-error-list" class="form-error hidden" style="margin:0 20px"></div>
+              <div class="table-scroll">
+                <table class="data-table compact hidden">
+                  <thead><tr><th></th><th>Name</th><th class="hide-sm">Size</th><th class="hide-md">Modified</th></tr></thead>
+                  <tbody id="cloud-files-body"></tbody>
+                </table>
+                <div id="cloud-empty" class="empty-state small"><p>Connect a provider and list its files.</p></div>
+              </div>
+              <div class="divider"></div>
+              <div class="panel-heading"><div><h3>Import history</h3></div></div>
+              <div id="cloud-history" class="event-feed"><p class="muted">No imports yet.</p></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-remote" class="view">
+          <div class="page-head">
+            <div><span class="eyebrow">Protection</span><h2>Remote access</h2><p>The app binds 127.0.0.1 on purpose. Reach it from your phone safely, over your own tailnet — never an exposed port.</p></div>
+            <button class="btn btn-primary" id="btn-remote-rescan" type="button"><svg class="icon"><use href="#i-refresh"/></svg> Rescan</button>
+          </div>
+          <div class="split-grid">
+            <div class="panel">
+              <div class="panel-heading">
+                <div><h3>Phone pairing</h3><p id="remote-note">Scan the QR from your phone while it is on the same tailnet.</p></div>
+                <span id="remote-pill" class="pill durability-state">…</span>
+              </div>
+              <div class="badge-embed">
+                <img id="remote-qr" class="remote-qr" alt="QR code for the remote URL" src="/api/pairing/qr.png">
+                <p class="muted form-note" id="remote-urls">Detecting…</p>
+              </div>
+              <div class="divider"></div>
+              <div id="remote-steps" class="state-list"><p class="muted">Checking environment…</p></div>
+            </div>
+            <div class="panel form-panel">
+              <div class="panel-heading"><div><h3>Safety model</h3><p>What remote access does and does not do.</p></div></div>
+              <div id="remote-safety" class="state-list"><p class="muted">Loading…</p></div>
+              <div class="divider"></div>
+              <div class="settings-form">
+                <span class="eyebrow form-eyebrow">Self-hosted &amp; metrics</span>
+                <div class="form-actions">
+                  <a class="btn btn-secondary btn-sm" href="/metrics" target="_blank" rel="noopener"><svg class="icon"><use href="#i-activity"/></svg> Prometheus /metrics</a>
+                  <a class="btn btn-secondary btn-sm" id="btn-ext-download" href="/api/extension/download"><svg class="icon"><use href="#i-download"/></svg> Browser extension (.zip)</a>
+                </div>
+                <p class="muted form-note">The extension adds right-click "Encrypt to GhostDrive" — it talks only to this machine's loopback API. See docs/REMOTE_ACCESS.md for the full guide.</p>
+              </div>
             </div>
           </div>
         </section>
@@ -785,6 +1049,7 @@
         </div>
         <div id="backend-fields" class="field-stack"></div>
         <label class="field"><span>Quota cap (GB, 0 = unlimited)</span><input id="backend-quota" type="number" min="0" step="1" value="0"></label>
+        <label class="setting-row"><div><strong>WORM (append-only)</strong><span>Never overwrite or delete from this backend, even on request. Application-level — protects against accidents and hostile cleanup, not disk-level attackers.</span></div><span class="switch"><input type="checkbox" id="backend-worm"><i></i></span></label>
         <div id="backend-error" class="form-error hidden"></div>
         <div class="modal-actions"><button class="btn btn-secondary" data-close-modal type="button">Cancel</button><button class="btn btn-primary" type="submit" id="btn-backend-save">Add backend</button></div>
       </form>
@@ -825,6 +1090,7 @@
           <label class="field"><span>Expires in</span><select id="envelope-ttl"><option value="1">1 hour</option><option value="24">24 hours</option><option value="72" selected>3 days</option><option value="168">7 days</option></select></label>
           <label class="field"><span>Max downloads</span><input id="envelope-max-downloads" type="number" min="1" placeholder="Unlimited"></label>
         </div>
+        <label class="setting-row"><div><strong>Burn after read</strong><span>Destroy the ciphertext after the first download. Later visits get a "burned" notice. Overrides max downloads.</span></div><span class="switch"><input type="checkbox" id="envelope-burn"><i></i></span></label>
         <div id="envelope-result" class="share-result hidden">
           <span>Envelope link ready</span>
           <div class="copy-row"><input id="envelope-url" readonly><button class="btn btn-secondary btn-sm" type="button" id="btn-copy-envelope-url"><svg class="icon"><use href="#i-copy"/></svg> Copy</button></div>

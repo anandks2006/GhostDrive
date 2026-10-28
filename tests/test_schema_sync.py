@@ -1,5 +1,5 @@
 """
-tests/test_schema_sync.py -- SCHEMA_VERSION 14 and the file_versions table.
+tests/test_schema_sync.py -- SCHEMA_VERSION 15 and the file_versions table.
 
 Covers the fresh-database DDL (STRICT table + descending index), the
 v13 -> v14 migration path (dropped table is recreated on reopen), reopen
@@ -80,11 +80,11 @@ def _version_record(file_id: str, version: int = 1) -> dict:
 
 # ── Schema version + fresh DDL ────────────────────────────────────────────────
 
-def test_schema_version_is_14(tmp_path):
-    assert SCHEMA_VERSION == 14
+def test_schema_version_is_15(tmp_path):
+    assert SCHEMA_VERSION == 15
     db = _make_db(tmp_path)
     try:
-        assert _schema_version(db) == 14
+        assert _schema_version(db) == 15
     finally:
         db.close()
 
@@ -120,7 +120,8 @@ def test_fresh_database_has_file_versions_table_and_index(tmp_path):
 # ── Migration ─────────────────────────────────────────────────────────────────
 
 def test_v13_migration_recreates_file_versions(tmp_path):
-    """A v13 database (table missing, version stamped 13) upgrades to v14."""
+    """A v13 database (table missing, version stamped 13) upgrades to the
+    current schema (v15: file_versions at v14, backends.append_only at v15)."""
     db = _make_db(tmp_path)
     with db.transaction():
         db._conn.execute("DROP TABLE IF EXISTS file_versions")
@@ -129,11 +130,17 @@ def test_v13_migration_recreates_file_versions(tmp_path):
     assert "file_versions" not in _objects(db, "table")
     db.close()
 
-    db = _make_db(tmp_path)  # reopening runs the v13 -> v14 migration
+    db = _make_db(tmp_path)  # reopening runs the v13 -> ... -> v15 ladder
     try:
-        assert _schema_version(db) == 14
+        assert _schema_version(db) == SCHEMA_VERSION
         assert "file_versions" in _objects(db, "table")
         assert "idx_file_versions_file" in _objects(db, "index")
+        # The v15 rung added the WORM capability column along the way.
+        cols = {
+            row["name"]
+            for row in db._conn.execute("PRAGMA table_info(backends)").fetchall()
+        }
+        assert "append_only" in cols
     finally:
         db.close()
 
@@ -143,7 +150,7 @@ def test_reopen_is_idempotent(tmp_path):
     db.close()
     db = _make_db(tmp_path)
     try:
-        assert _schema_version(db) == 14
+        assert _schema_version(db) == SCHEMA_VERSION
         assert "file_versions" in _objects(db, "table")
         # Repeated opens never run destructive DDL: CRUD still answers.
         assert db.list_file_versions(str(uuid.uuid4())) == []

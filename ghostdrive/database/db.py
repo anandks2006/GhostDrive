@@ -1776,6 +1776,24 @@ class GhostDriveDB:
                     logger.info("Database migration: v13 -> v14 (file version history).")
                     current = 14
 
+                if current == 14:
+                    # v14 -> v15: WORM / append-only backend capability flag.
+                    # backends.append_only marks a backend whose bytes must
+                    # never be overwritten or deleted through the app, even on
+                    # request (application-level WORM, not hardware WORM).
+                    # Fresh installs already have the column from
+                    # CREATE_BACKENDS; this guarded ALTER upgrades v14 rows.
+                    try:
+                        cols = [r["name"] for r in self._conn.execute("PRAGMA table_info(backends)").fetchall()]
+                        if "append_only" not in cols:
+                            self._conn.execute(
+                                "ALTER TABLE backends ADD COLUMN append_only INTEGER NOT NULL DEFAULT 0"
+                            )
+                        logger.info("Database migration: v14 -> v15 (backends.append_only WORM flag).")
+                    except sqlite3.OperationalError as e:
+                        logger.warning("Database migration v14 -> v15 warning: %s", e)
+                    current = 15
+
                 for ddl in ALL_DDL:
                     stmt = ddl.strip()
                     if stmt:

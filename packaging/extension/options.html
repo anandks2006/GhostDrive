@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GhostDrive options</title>
+  <style>
+    :root {
+      --bg: #151a12;
+      --panel: #1d2418;
+      --accent: #c4f56a;
+      --amber: #e8b84a;
+      --red: #e85d5d;
+      --text: #d8e3cc;
+      --muted: #8b987c;
+    }
+    body {
+      max-width: 460px;
+      margin: 40px auto;
+      padding: 0 16px;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    h1 { font-size: 16px; color: var(--accent); letter-spacing: 0.06em; }
+    p.hint { color: var(--muted); font-size: 12px; }
+    label { display: block; margin: 14px 0 4px; color: var(--muted); font-size: 12px; }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid #2c3623;
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: inherit;
+    }
+    input:focus { outline: 1px solid var(--accent); }
+    .row { display: flex; gap: 10px; }
+    .row button { flex: 1; }
+    button {
+      margin-top: 14px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--accent);
+      background: transparent;
+      color: var(--accent);
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover { background: #232c1b; }
+    button.secondary { border-color: #2c3623; color: var(--muted); }
+    #status { margin-top: 16px; min-height: 20px; font-size: 13px; color: var(--muted); }
+    #status.ok { color: var(--accent); }
+    #status.warn { color: var(--amber); }
+    #status.err { color: var(--red); }
+  </style>
+</head>
+<body>
+  <h1>GHOSTDRIVE EXTENSION OPTIONS</h1>
+  <p class="hint">
+    The extension talks only to a GhostDrive app on this machine's loopback
+    interface (127.0.0.1 / localhost). No other hosts are permitted by the
+    manifest.
+  </p>
+
+  <label for="base-url">GhostDrive app URL (http://127.0.0.1:PORT)</label>
+  <input id="base-url" type="text" spellcheck="false" />
+
+  <label for="vault-path">Default vault folder (e.g. browser/)</label>
+  <input id="vault-path" type="text" spellcheck="false" />
+
+  <div class="row">
+    <button id="save">Save settings</button>
+    <button id="test" class="secondary">Test connection</button>
+  </div>
+
+  <div id="status"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

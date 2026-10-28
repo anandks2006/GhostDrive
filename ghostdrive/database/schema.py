@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS backends (
     quota_reserved    INTEGER NOT NULL DEFAULT 0,
     ml_artifacts_only INTEGER NOT NULL DEFAULT 0,  -- 0|1 bool
     cpu_intensive     INTEGER NOT NULL DEFAULT 0,  -- 0|1 bool
+    append_only       INTEGER NOT NULL DEFAULT 0,  -- 0|1 bool: WORM -- never
+                      -- overwrite/delete through the app, even on request
+                      -- (application-level enforcement, see services/files.py)
     latency_ms        REAL,                 -- last health-check round trip
     last_error        TEXT,                 -- last health-check error (NULL if healthy)
     deprecated_at     TEXT                  -- ISO-8601, NULL if not deprecated
@@ -525,7 +528,7 @@ ALL_DDL: list[str] = [
 
 # ─── Schema version (for future migrations) ───────────────────────────────────
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15  # v15: backends.append_only (WORM / append-only flag)
 
 CREATE_SCHEMA_VERSION = """
 CREATE TABLE IF NOT EXISTS schema_version (

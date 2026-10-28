@@ -37,6 +37,22 @@
     statusEl.className = kind || ""; // "", "error" or "ok"
   }
 
+  // Burned / revoked / expired links: surface the server's own message in a
+  // dedicated <div> so the failure is readable even though decryption never
+  // started (plain DOM, no framework).  Burn-after-read links answer 410
+  // here the moment a second party tries a second fetch.
+  function showHeaderError(message) {
+    setStatus(message, "error");
+    var box = document.getElementById("gd-error");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "gd-error";
+      box.setAttribute("role", "alert");
+      document.body.appendChild(box);
+    }
+    box.textContent = message;
+  }
+
   // base64 -> Uint8Array (atob is synchronous and fine for these sizes).
   function b64bytes(s) {
     var bin = atob(s);
@@ -76,12 +92,18 @@
       );
       var served = await headerRes.json().catch(function () { return {}; });
       if (!headerRes.ok) {
-        throw new Error(served.detail || "This share link is unavailable.");
+        // Burned (410), revoked/expired (403) or unknown (404): show the
+        // server's own message instead of attempting decryption.
+        showHeaderError(served.detail || "This share link is unavailable.");
+        return;
       }
 
       var blobRes = await fetch(served.envelope_url);
       if (!blobRes.ok) {
-        throw new Error("Could not download the encrypted envelope.");
+        // A burn-after-read link can be burned between the header fetch and
+        // the blob fetch (410 raced us) — surface the server's detail if any.
+        var blobErr = await blobRes.json().catch(function () { return {}; });
+        throw new Error(blobErr.detail || "Could not download the encrypted envelope.");
       }
       var raw = await blobRes.arrayBuffer();
 

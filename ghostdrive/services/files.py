@@ -51,6 +51,82 @@ MEDIA_EXTENSIONS = {".mp4", ".mkv", ".mp3", ".wav", ".flac", ".avi", ".mov", ".w
 ARCHIVE_EXTENSIONS = {".zip", ".tar", ".gz", ".7z", ".rar", ".bz2", ".xz"}
 
 
+# ── WORM / append-only backend enforcement ───────────────────────────────────
+#
+# A backend flagged `append_only` (DB column, v15) accepts writes/uploads but
+# REFUSES deletes and overwrites at the application layer. Honest scope: this
+# is application-level enforcement, not hardware WORM. A machine attacker with
+# disk access can still delete files; the flag's purpose is to stop accidents,
+# ransomware-driven cleanup, and hostile insiders using the app itself.
+# Compliance users should pair it with a truly immutable backend (S3 Object
+# Lock, WORM tape, read-only snapshot mount).
+#
+# What WORM protects: chunk bytes on the flagged backend. What it does NOT
+# protect: the index. Deleting a file whose chunks live only on WORM backends
+# still tombstones/purges the metadata -- the file becomes "logically deleted,
+# bytes retained (WORM)".
+#
+# Overwrite note (verified, not assumed): uploads never overwrite existing
+# chunk objects. Chunk object names are per-upload UUIDv4-based (local:
+# ".{chunk_id}_{sub_index}.gdc"), and dedup reuses index rows via ref_count++
+# instead of re-uploading (pipeline/dedup.py), so no application path issues a
+# write against an existing reference on a WORM backend.
+
+
+class WormViolationError(Exception):
+    """Raised when a delete/overwrite is attempted on a WORM (append-only) backend.
+
+    Carries the backend id and, when known, the reference so logs and API
+    error paths can point at the exact object the app refused to remove.
+    """
+
+    def __init__(self, backend_id: str, reference_id: Optional[str] = None) -> None:
+        self.backend_id = backend_id
+        self.reference_id = reference_id
+        detail = f"reference {reference_id!r}" if reference_id else "backend"
+        super().__init__(
+            f"Backend {backend_id} is append-only (WORM): refusing to delete {detail}. "
+            "WORM protects bytes, not the index; toggle append_only off first "
+            "if deletion is truly intended."
+        )
+
+
+def worm_backend_ids(db=None) -> set[str]:
+    """Ids of every backend flagged append-only (WORM) in the database.
+
+    Reads the backends.append_only column directly -- the per-instance toggle
+    lives in the DB row, not in the backend plugin's class attribute.
+    """
+    if db is None:
+        db = require_db()
+    rows = db._conn.execute("SELECT id FROM backends WHERE append_only = 1").fetchall()
+    return {row["id"] for row in rows}
+
+
+def assert_backend_writable(backend_id: str, reference_id: Optional[str] = None, db=None) -> None:
+    """Raise WormViolationError if ``backend_id`` is flagged append-only (WORM).
+
+    Call this before any code path that would delete or overwrite a backend
+    object. Pass ``db`` when the caller already holds it, to avoid the
+    require_db() round-trip.
+    """
+    if backend_id in worm_backend_ids(db):
+        raise WormViolationError(backend_id, reference_id)
+
+
+def filter_deletable(locations, db=None) -> tuple[list, list]:
+    """Split chunk-location rows into ``(deletable, skipped_worm)``.
+
+    ``locations`` are chunk_locations rows (or any mapping exposing
+    ``backend_id``). Locations on append-only backends land in
+    ``skipped_worm`` and must not have their bytes deleted.
+    """
+    worm = worm_backend_ids(db)
+    deletable = [loc for loc in locations if loc["backend_id"] not in worm]
+    skipped = [loc for loc in locations if loc["backend_id"] in worm]
+    return deletable, skipped
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -530,10 +606,23 @@ def rename(file_id: str, new_name: str) -> dict:
     return {"status": "success", "file": file_dict(get_file_row(file_id))}
 
 
-async def _delete_backend_objects_for_file(file_id: str, objects: Optional[dict] = None) -> None:
+async def _delete_backend_objects_for_file(file_id: str, objects: Optional[dict] = None) -> dict:
+    """Delete every non-shared chunk object of a file from the backends.
+
+    WORM: locations on append-only (append_only) backends are skipped -- their
+    bytes are never deleted through the app, even on permanent purge. The
+    caller still purges the index rows; the file becomes "logically deleted,
+    bytes retained (WORM)".
+
+    Returns:
+        {"deleted": <delete calls attempted>, "skipped_worm": <objects retained>}.
+    """
     db = require_db()
     if objects is None:
         _, objects = await active_backends(connect_remote=False)
+    worm = worm_backend_ids(db)
+    deleted = 0
+    skipped_worm = 0
     for chunk in db.get_file_chunks(file_id):
         for loc in db.get_chunk_locations(chunk["id"]):
             if loc["status"] != "confirmed" or not loc["reference_id"]:
@@ -546,24 +635,49 @@ async def _delete_backend_objects_for_file(file_id: str, objects: Optional[dict]
             ).fetchone()
             if shared:
                 continue
+            if loc["backend_id"] in worm:
+                # WORM (application-level): keep the bytes. The index row
+                # goes away with the purge, but the object stays on the
+                # backend -- see the module-level WORM notes for scope.
+                skipped_worm += 1
+                continue
             obj = objects.get(loc["backend_id"])
             if obj is None:
                 continue
             try:
                 await obj.delete(loc["reference_id"])
+                deleted += 1
             except Exception as exc:
                 logger.warning("Backend delete failed for %s: %s", loc["reference_id"], exc)
+    if skipped_worm:
+        logger.info(
+            "WORM: retained %d chunk object(s) on append-only backend(s) for file %s",
+            skipped_worm, file_id[:8],
+        )
+    return {"deleted": deleted, "skipped_worm": skipped_worm}
 
 
 async def delete_file(file_id: str, purge: bool = False) -> dict:
     db = require_db()
     row = get_file_row(file_id)
     if purge or row["tier"] == "DISPOSABLE":
-        await _delete_backend_objects_for_file(file_id)
+        deletion = await _delete_backend_objects_for_file(file_id)
         with db.transaction():
             db.purge_file_permanently(file_id)
         meter.status(f"Permanently deleted {row['name']}")
-        return {"status": "success", "message": f"File {row['name']!r} permanently deleted."}
+        message = f"File {row['name']!r} permanently deleted."
+        if deletion["skipped_worm"]:
+            # WORM protects bytes, not the index: the metadata is gone, but
+            # the flagged backends still hold the chunk objects.
+            message += (
+                f" {deletion['skipped_worm']} chunk object(s) retained on "
+                "append-only (WORM) backend(s)."
+            )
+        return {
+            "status": "success",
+            "message": message,
+            "skipped_worm": deletion["skipped_worm"],
+        }
 
     with db.transaction():
         db.tombstone_file(file_id)
@@ -592,10 +706,12 @@ async def empty_trash(older_than_days: Optional[int] = None) -> dict:
     db = require_db()
     rows = db.list_tombstoned_files(older_than_days=older_than_days)
     purged = 0
+    skipped_worm = 0
     for row in rows:
-        await delete_file(row["id"], purge=True)
+        result = await delete_file(row["id"], purge=True)
         purged += 1
-    return {"status": "success", "purged": purged}
+        skipped_worm += int(result.get("skipped_worm", 0))
+    return {"status": "success", "purged": purged, "skipped_worm": skipped_worm}
 
 
 def versions(file_id: str) -> dict:

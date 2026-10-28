@@ -374,7 +374,10 @@ def test_v13_database_migrates_to_file_version_history(tmp_path):
             "SELECT version FROM schema_version"
         ).fetchone()[0]
         assert version == SCHEMA_VERSION
-        assert SCHEMA_VERSION == 14
+        # v14 introduced file_versions; the ladder has since advanced (v15
+        # added the WORM backends.append_only column), so assert the migrated
+        # DB matches the current constant rather than a hardcoded number.
+        assert SCHEMA_VERSION >= 14
 
         tables = {
             row[0]

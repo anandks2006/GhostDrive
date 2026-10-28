@@ -61,6 +61,15 @@ class BackendBase(ABC):
     ml_artifacts_only:       bool = False
     cpu_intensive:           bool = False
 
+    # WORM (write-once, read-many) / append-only marker. Like the flags above
+    # this is a STATIC capability marker: plugin types that can operate
+    # append-only set it True. The live per-backend toggle is the
+    # backends.append_only DB column (default 0); the delete paths consult the
+    # DB row via services/files.py (worm_backend_ids / assert_backend_writable),
+    # not this class attribute, because only the DB knows which instance was
+    # flagged. Enforcement is application-level, not hardware WORM.
+    append_only:             bool = False
+
     tier: str = "IMPORTANT"
 
     logical_chunk_bytes: int = 50 * 1024 * 1024

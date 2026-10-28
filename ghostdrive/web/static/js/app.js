@@ -61,6 +61,10 @@
     recovery: ["Disaster recovery", "Recovery kit"],
     telemetry: ["Monitor", "Telemetry"],
     settings: ["Preferences", "Settings"],
+    security: ["Protection", "Tripwires"],
+    airgap: ["Protection", "Air-gap & waste"],
+    cloud: ["Protection", "Cloud import"],
+    remote: ["Protection", "Remote access"],
   };
 
   const TIER_COLORS = {
@@ -639,6 +643,55 @@
     $("#btn-save-settings").addEventListener("click", saveSettings);
     $("#setting-accent").addEventListener("input", (event) => applyAccent(event.target.value));
 
+    // ── New feature bindings ──────────────────────────────────────────
+    $("#btn-sync-quick-add").addEventListener("click", quickAddDownloads);
+
+    // Tripwires (canary + mass-change alarm).
+    $("#canary-form").addEventListener("submit", addCanary);
+    $("#canary-enabled-input").addEventListener("change", saveCanaryEnabled);
+    $("#btn-canary-check").addEventListener("click", checkCanariesNow);
+    $("#canary-list").addEventListener("click", handleCanaryAction);
+    $("#mass-form").addEventListener("submit", saveMassSettings);
+    $("#btn-mass-check").addEventListener("click", checkMassNow);
+
+    // Air-gap & waste.
+    $("#airgap-form").addEventListener("submit", saveAirgapSettings);
+    $("#btn-airgap-export").addEventListener("click", runAirgapExport);
+    $("#btn-airgap-verify").addEventListener("click", runAirgapVerify);
+    $("#btn-airgap-drill").addEventListener("click", runAirgapDrill);
+    $("#btn-waste-refresh").addEventListener("click", loadWaste);
+
+    // Cloud import.
+    $("#cloud-connect-form").addEventListener("submit", cloudConnect);
+    $("#btn-cloud-refresh").addEventListener("click", loadCloud);
+    $("#btn-cloud-list").addEventListener("click", cloudList);
+    $("#btn-cloud-import").addEventListener("click", cloudImport);
+    $("#cloud-browse-provider").addEventListener("change", () => {
+      $("#cloud-files-body").innerHTML = "";
+      $("#cloud-empty").classList.remove("hidden");
+    });
+
+    // Remote access.
+    $("#btn-remote-rescan").addEventListener("click", loadRemote);
+
+    // Weekly health report.
+    $("#btn-health-report-run").addEventListener("click", runHealthReportNow);
+    $("#btn-health-report-save").addEventListener("click", saveHealthReportSettings);
+
+    // Inheritance switch.
+    $("#btn-inheritance-enable").addEventListener("click", enableInheritance);
+    $("#btn-inheritance-checkin").addEventListener("click", inheritanceCheckIn);
+    $("#btn-inheritance-disable").addEventListener("click", disableInheritance);
+
+    // Content search.
+    $("#btn-content-search").addEventListener("click", runContentSearch);
+    $("#content-search-input").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        runContentSearch();
+      }
+    });
+
     window.addEventListener("beforeunload", closeTelemetry);
   }
 
@@ -851,6 +904,10 @@
       recovery: loadRecovery,
       telemetry: async () => connectTelemetry(),
       settings: loadSettings,
+      security: loadSecurity,
+      airgap: loadAirgap,
+      cloud: loadCloud,
+      remote: loadRemote,
     };
     const loader = loaders[view];
     if (loader) {
@@ -1400,6 +1457,7 @@
           file_id: state.envelopeFileId,
           ttl_hours: Number($("#envelope-ttl").value) || 72,
           max_downloads: maxDownloads ? Number(maxDownloads) : null,
+          burn_after_read: $("#envelope-burn").checked,
         },
       });
       created = true;
@@ -1769,12 +1827,13 @@
   // ── Monitoring: badge, drills, alerts ─────────────────────────────────
 
   async function loadMonitoring() {
-    const [badge, summary, drills, alerts, scheduler] = await Promise.all([
+    const [badge, summary, drills, alerts, scheduler, healthReport] = await Promise.all([
       api("/api/monitoring/badge"),
       api("/api/monitoring/drills/summary"),
       api("/api/monitoring/drills"),
       api("/api/monitoring/alerts"),
       api("/api/monitoring/scheduler"),
+      api("/api/health/report").catch(() => null),
     ]);
     state.monitorAlerts = Array.isArray(alerts.alerts) ? alerts.alerts : [];
     renderMonitorBadge(badge);
@@ -1783,6 +1842,10 @@
     renderAlerts(state.monitorAlerts);
     renderScheduler(scheduler);
     renderNavAlertBadge(alerts.active_count);
+    if (healthReport) {
+      state.healthReport = healthReport.report || null;
+      renderHealthReport(healthReport.last_run, healthReport.report);
+    }
   }
 
   function renderMonitorBadge(badge) {
@@ -2023,7 +2086,7 @@
     return `<article class="backend-card">
       <div class="backend-head">
         <span class="backend-icon">${icon(backendIcon(backend.provider_key))}</span>
-        <div class="backend-title"><strong title="${esc(backend.name)}">${esc(backend.name)}</strong><span>${esc(backend.provider)}</span></div>
+        <div class="backend-title"><strong title="${esc(backend.name)}">${esc(backend.name)}</strong><span>${esc(backend.provider)}${backend.append_only ? " · WORM" : ""}</span></div>
         <label class="switch" title="Enable or disable backend">
           <input type="checkbox" data-backend-toggle="${esc(backend.id)}" ${backend.enabled ? "checked" : ""}>
           <i></i>
@@ -2036,6 +2099,7 @@
       <div class="backend-foot">
         <span class="backend-status"><span class="status-dot ${online ? "ok" : "warn"}"></span>${esc(backend.status)}${backend.latency_ms ? ` · ${Number(backend.latency_ms).toFixed(0)} ms` : ""}</span>
         <div class="backend-actions">
+          <button class="row-button" data-backend-action="worm" data-id="${esc(backend.id)}" title="${backend.append_only ? "Disable WORM (append-only)" : "Enable WORM (append-only)"}">${icon("lock")}</button>
           <button class="row-button" data-backend-action="test" data-id="${esc(backend.id)}" title="Test connection">${icon("activity")}</button>
           <button class="row-button danger" data-backend-action="remove" data-id="${esc(backend.id)}" title="Remove backend">${icon("trash")}</button>
         </div>
@@ -2176,6 +2240,7 @@
           enabled: true,
           credentials,
           quota_cap_gb: Number($("#backend-quota").value) || 0,
+          append_only: $("#backend-worm").checked,
         },
       });
       closeModal("backend-modal");
@@ -2207,6 +2272,28 @@
       } finally {
         setBusy(button, false);
       }
+    }
+    if (button.dataset.backendAction === "worm") {
+      const enabling = !backend.append_only;
+      const confirmed = await confirmAction(
+        enabling ? "Enable WORM mode?" : "Disable WORM mode?",
+        enabling
+          ? `“${backend.name}” will refuse to overwrite or delete anything, even on request. Chunks already on it are retained through purge.`
+          : `“${backend.name}” will allow deletes again. Bytes retained under WORM are not restored automatically.`,
+        enabling ? "Enable WORM" : "Disable WORM"
+      );
+      if (!confirmed) return;
+      try {
+        await api(`/api/backends/${encodeURIComponent(backend.id)}/worm`, {
+          method: "POST",
+          body: { enabled: enabling },
+        });
+        toast(enabling ? "WORM enabled — this backend is now append-only." : "WORM disabled.");
+        await loadBackends();
+      } catch (error) {
+        toast(error.message, "error");
+      }
+      return;
     }
     if (button.dataset.backendAction === "remove") {
       const confirmed = await confirmAction(
@@ -2994,13 +3081,16 @@
   }
 
   async function loadRecovery() {
-    const [recovery, portable] = await Promise.all([
+    const [recovery, portable, inheritance] = await Promise.all([
       api("/api/recovery/status"),
       api("/api/portable/status"),
+      api("/api/inheritance/status").catch(() => null),
     ]);
     state.recoveryStatus = recovery;
     state.portableStatus = portable;
+    state.inheritanceStatus = inheritance;
     renderRecoveryStatus();
+    if (inheritance) renderInheritance(inheritance);
   }
 
   function renderRecoveryStatus() {
@@ -3529,6 +3619,679 @@
       setReadiness("warn", "Local-only mode");
     } else {
       setReadiness("error", "Attention needed");
+    }
+  }
+
+  // ── Tripwires: canary files + mass-change alarm ─────────────────────
+
+  async function loadSecurity() {
+    const [canaries, mass] = await Promise.all([
+      api("/api/security/canaries"),
+      api("/api/security/mass-change"),
+    ]);
+    renderCanaries(canaries);
+    renderMassStatus(mass);
+  }
+
+  function renderCanaries(data) {
+    const pill = $("#canary-pill");
+    pill.textContent = data.enabled ? "ARMED" : "OFF";
+    pill.className = `pill durability-state ${data.enabled ? "state-degraded" : ""}`;
+    $("#canary-count").textContent = formatNumber((data.canaries || []).length);
+    $("#canary-interval").textContent = `every ${formatNumber(data.interval_seconds)} s`;
+    $("#canary-enabled-input").checked = Boolean(data.enabled);
+    const list = $("#canary-list");
+    const canaries = Array.isArray(data.canaries) ? data.canaries : [];
+    const missing = canaries.filter((item) => item.missing).length;
+    $("#canary-missing").textContent = formatNumber(missing);
+    if (!canaries.length) {
+      list.innerHTML = `<p class="muted sync-roots-empty">No canaries planted yet.</p>`;
+      return;
+    }
+    list.innerHTML = canaries
+      .map(
+        (item, index) => `<div class="sync-root-chip">
+          <div><strong title="${esc(item.path)}">${esc(item.path.split(/[\\/]/).pop() || item.path)}</strong><span>${esc(item.path)} · gen ${Number(item.generation) || 0}${item.missing ? " · MISSING" : ""}</span></div>
+          <button class="row-button danger sync-root-remove" data-canary-index="${index}" data-canary-path="${esc(item.path)}" title="Remove canary">${icon("trash")}</button>
+        </div>`
+      )
+      .join("");
+  }
+
+  async function addCanary(event) {
+    event.preventDefault();
+    clearError("canary-error");
+    const path = $("#canary-path-input").value.trim();
+    if (!path) return showError("canary-error", "Enter a full file path for the canary.");
+    const button = $("#btn-canary-add");
+    setBusy(button, true, "Planting");
+    try {
+      const result = await api("/api/security/canary/add", { method: "POST", body: { path, plant: true } });
+      $("#canary-path-input").value = "";
+      toast("Canary planted. Any change to it will fire a critical alert.");
+      renderCanaries(result);
+    } catch (error) {
+      showError("canary-error", error.message);
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function saveCanaryEnabled() {
+    try {
+      const result = await api("/api/security/canary/settings", {
+        method: "POST",
+        body: { enabled: $("#canary-enabled-input").checked },
+      });
+      renderCanaries(result);
+      toast(result.enabled ? "Canary watching enabled." : "Canary watching disabled.");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  async function checkCanariesNow() {
+    const button = $("#btn-canary-check");
+    setBusy(button, true, "Checking");
+    try {
+      const result = await api("/api/security/canary/check", { method: "POST" });
+      toast(
+        result.triggers
+          ? `${formatNumber(result.triggers)} canar${result.triggers === 1 ? "y" : "ies"} tampered — critical alert raised.`
+          : `Checked ${formatNumber(result.checked)} canar${result.checked === 1 ? "y" : "ies"} — all clean.`,
+        result.triggers ? "error" : "success"
+      );
+      await loadSecurity();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function handleCanaryAction(event) {
+    const button = event.target.closest("[data-canary-path]");
+    if (!button) return;
+    const path = button.dataset.canaryPath;
+    const confirmed = await confirmAction("Remove canary?", `Stop watching “${path}”. The decoy file is deleted too.`, "Remove canary");
+    if (!confirmed) return;
+    try {
+      const result = await api(`/api/security/canary?path=${encodeURIComponent(path)}&delete_file=true`, { method: "DELETE" });
+      toast("Canary removed.");
+      renderCanaries(result);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  function renderMassStatus(data) {
+    const pill = $("#mass-pill");
+    pill.textContent = data.enabled ? "ARMED" : "OFF";
+    pill.className = `pill durability-state ${data.enabled ? "state-degraded" : ""}`;
+    $("#mass-threshold").textContent = `${formatNumber(data.threshold)} files`;
+    $("#mass-window").textContent = `${formatNumber(data.window_minutes)} min`;
+    $("#mass-threshold-input").value = String(Number(data.threshold) || 50);
+    $("#mass-window-input").value = String(Number(data.window_minutes) || 5);
+    $("#mass-enabled-input").checked = Boolean(data.enabled);
+    const last = data.last;
+    $("#mass-last").textContent = last && last.at ? `${formatDate(last.at)} ${formatTime(last.at)}` : "Never";
+    $("#mass-count").textContent = last && last.count !== undefined ? formatNumber(last.count) : "—";
+  }
+
+  async function saveMassSettings(event) {
+    event.preventDefault();
+    clearError("mass-error");
+    try {
+      const result = await api("/api/security/mass-change/settings", {
+        method: "POST",
+        body: {
+          enabled: $("#mass-enabled-input").checked,
+          threshold: Number($("#mass-threshold-input").value) || 50,
+          window_minutes: Number($("#mass-window-input").value) || 5,
+        },
+      });
+      renderMassStatus(result);
+      toast("Mass-change alarm settings saved.");
+    } catch (error) {
+      showError("mass-error", error.message);
+    }
+  }
+
+  async function checkMassNow() {
+    const button = $("#btn-mass-check");
+    setBusy(button, true, "Scanning");
+    try {
+      const result = await api("/api/security/mass-change/check", { method: "POST" });
+      toast(
+        result.triggered
+          ? `${formatNumber(result.count)} files changed — critical alert raised.`
+          : `${formatNumber(result.count)} changes in the window — below threshold.`,
+        result.triggered ? "error" : "success"
+      );
+      await loadSecurity();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  // ── Air-gap export & waste report ───────────────────────────────────
+
+  async function loadAirgap() {
+    const [status] = await Promise.all([api("/api/airgap/status"), loadWaste()]);
+    renderAirgap(status);
+  }
+
+  function renderAirgap(status) {
+    const pill = $("#airgap-pill");
+    pill.textContent = status.enabled ? "ARMED" : "OFF";
+    pill.className = `pill durability-state ${status.enabled ? "state-protected" : ""}`;
+    $("#airgap-target").textContent = status.target_dir || "Not set";
+    if (!status.target_exists && status.target_dir) $("#airgap-target").textContent = `${status.target_dir} (missing)`;
+    $("#airgap-interval").textContent = `every ${formatNumber(status.interval_hours)} h`;
+    $("#airgap-target-input").value = status.target_dir || "";
+    $("#airgap-interval-input").value = String(Number(status.interval_hours) || 168);
+    $("#airgap-enabled-input").checked = Boolean(status.enabled);
+    const last = status.last;
+    $("#airgap-last").textContent = last
+      ? `${last.ok ? "OK" : "FAILED"} · ${formatDate(last.at)} · ${formatBytes(last.bytes || 0)}`
+      : "Never";
+    const drill = status.last_drill;
+    $("#airgap-drill").textContent = drill
+      ? `${drill.ok ? "PASSED" : "FAILED"} · ${formatDate(drill.at || drill.checked_at)}`
+      : "Never";
+  }
+
+  async function saveAirgapSettings(event) {
+    event.preventDefault();
+    clearError("airgap-error");
+    try {
+      await api("/api/airgap/settings", {
+        method: "POST",
+        body: {
+          enabled: $("#airgap-enabled-input").checked,
+          target_dir: $("#airgap-target-input").value.trim(),
+          interval_hours: Number($("#airgap-interval-input").value) || 168,
+        },
+      });
+      toast("Air-gap settings saved.");
+      await loadAirgap();
+    } catch (error) {
+      showError("airgap-error", error.message);
+    }
+  }
+
+  async function runAirgapExport() {
+    const button = $("#btn-airgap-export");
+    setBusy(button, true, "Exporting");
+    try {
+      const result = await api("/api/airgap/export", { method: "POST" });
+      toast(result.ok ? `Exported ${formatNumber(result.file_count)} files (${formatBytes(result.bytes)}) to the air-gap drive.` : `Export failed: ${result.error}`, result.ok ? "success" : "error");
+      await loadAirgap();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function runAirgapVerify() {
+    const button = $("#btn-airgap-verify");
+    setBusy(button, true, "Verifying");
+    try {
+      const result = await api("/api/airgap/verify", { method: "POST" });
+      toast(
+        result.ok
+          ? `Export verified — ${formatNumber(result.checked_chunks)} chunks checked.`
+          : `Verification failed: ${result.error || `${result.missing} missing, ${result.corrupt} corrupt`}`,
+        result.ok ? "success" : "error"
+      );
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function runAirgapDrill() {
+    const button = $("#btn-airgap-drill");
+    setBusy(button, true, "Drilling");
+    try {
+      const result = await api("/api/airgap/drill", { method: "POST" });
+      toast(result.ok ? `Restore drill passed — “${result.file}” verified from the export.` : `Restore drill FAILED: ${result.error}`, result.ok ? "success" : "error");
+      await loadAirgap();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function loadWaste() {
+    try {
+      const data = await api("/api/waste/report");
+      renderWaste(data);
+    } catch (error) {
+      $("#waste-note").textContent = `Waste report unavailable: ${error.message}`;
+    }
+  }
+
+  function renderWaste(data) {
+    $("#waste-reclaimable").textContent = formatBytes(data.total_reclaimable_bytes);
+    const dedup = data.dedup || {};
+    $("#waste-dedup").textContent = formatBytes(dedup.wasted_bytes || dedup.potential_reclaim_bytes || 0);
+    const trash = data.trash || {};
+    $("#waste-trash").textContent = formatBytes(trash.bytes || 0);
+    const versions = data.versions || {};
+    $("#waste-versions").textContent = versions.bytes != null ? formatBytes(versions.bytes) : formatNumber(versions.count || 0);
+    const top = Array.isArray(data.top_duplicates) ? data.top_duplicates : [];
+    const container = $("#waste-duplicates");
+    if (!top.length) {
+      container.innerHTML = `<p class="muted">No duplicated content detected.</p>`;
+      return;
+    }
+    const max = Math.max(...top.map((item) => Number(item.size) * Number(item.copies)), 1);
+    container.innerHTML = top
+      .map(
+        (item) => `<div class="bar-row">
+          <div><strong>${formatBytes(item.size)} × ${formatNumber(item.copies)}</strong><span>${esc((item.sample_paths || []).join(" · ") || "identical chunks")}</span></div>
+          <div class="bar-track"><span style="width:${clamp(((Number(item.size) * Number(item.copies)) / max) * 100, 2, 100)}%"></span></div>
+        </div>`
+      )
+      .join("");
+  }
+
+  // ── Cloud import ────────────────────────────────────────────────────
+
+  const CLOUD_PROVIDER_LABELS = { dropbox: "Dropbox", gdrive: "Google Drive", onedrive: "OneDrive" };
+
+  async function loadCloud() {
+    const [status, history] = await Promise.all([
+      api("/api/cloud/status"),
+      api("/api/cloud/history").catch(() => ({ history: [] })),
+    ]);
+    renderCloudConnections(status);
+    renderCloudHistory(history.history || history.imports || []);
+  }
+
+  function renderCloudConnections(status) {
+    const container = $("#cloud-connections");
+    const browse = $("#cloud-browse-provider");
+    const entries = Object.entries(status || {});
+    if (!entries.length) {
+      container.innerHTML = `<p class="muted">No providers available.</p>`;
+      return;
+    }
+    container.innerHTML = entries
+      .map(
+        ([provider, info]) => `<div class="sync-root-chip">
+          <div><strong>${esc(CLOUD_PROVIDER_LABELS[provider] || provider)}</strong><span>${info.connected ? `Connected · token …${esc(info.token_hint || "")}` : "Not connected"}</span></div>
+          ${
+            info.connected
+              ? `<button class="row-button" data-cloud-disconnect="${esc(provider)}" title="Disconnect">${icon("close")}</button>`
+              : ""
+          }
+        </div>`
+      )
+      .join("");
+    container.querySelectorAll("[data-cloud-disconnect]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        try {
+          await api("/api/cloud/disconnect", { method: "POST", body: { provider: button.dataset.cloudDisconnect } });
+          toast("Provider disconnected.");
+          await loadCloud();
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      });
+    });
+    // Rebuild the browse dropdown from connected providers only.
+    const connected = entries.filter(([, info]) => info.connected).map(([provider]) => provider);
+    browse.innerHTML = connected.length
+      ? connected.map((provider) => `<option value="${esc(provider)}">${esc(CLOUD_PROVIDER_LABELS[provider] || provider)}</option>`).join("")
+      : `<option value="">Not connected</option>`;
+  }
+
+  function renderCloudHistory(history) {
+    const container = $("#cloud-history");
+    if (!history.length) {
+      container.innerHTML = `<p class="muted">No imports yet.</p>`;
+      return;
+    }
+    container.innerHTML = history
+      .slice(0, 10)
+      .map(
+        (item) => `<div class="event-row">
+          <span class="status-dot ${item.failed ? "warn" : "ok"}"></span>
+          <div><strong>${esc(CLOUD_PROVIDER_LABELS[item.provider] || item.provider || "?")} · ${formatNumber(item.imported || 0)} imported${item.failed ? `, ${formatNumber(item.failed)} failed` : ""}</strong><span>${formatBytes(item.bytes || 0)} · ${esc(item.at || "")}</span></div>
+        </div>`
+      )
+      .join("");
+  }
+
+  async function cloudConnect(event) {
+    event.preventDefault();
+    clearError("cloud-error");
+    const provider = $("#cloud-provider-input").value;
+    const token = $("#cloud-token-input").value.trim();
+    if (!token) return showError("cloud-error", "Paste an access token.");
+    const button = $("#btn-cloud-connect");
+    setBusy(button, true, "Validating");
+    try {
+      await api("/api/cloud/connect", { method: "POST", body: { provider, token } });
+      $("#cloud-token-input").value = "";
+      toast(`${CLOUD_PROVIDER_LABELS[provider] || provider} connected.`);
+      await loadCloud();
+    } catch (error) {
+      showError("cloud-error", error.message);
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function cloudList() {
+    const provider = $("#cloud-browse-provider").value;
+    const errorBox = $("#cloud-error-list");
+    errorBox.classList.add("hidden");
+    if (!provider) return showError("cloud-error-list", "Connect a provider first.");
+    const button = $("#btn-cloud-list");
+    setBusy(button, true, "Listing");
+    try {
+      const data = await api(`/api/cloud/list?provider=${encodeURIComponent(provider)}`);
+      state.cloudFiles = Array.isArray(data.files) ? data.files : [];
+      renderCloudFiles();
+    } catch (error) {
+      showError("cloud-error-list", error.message);
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  function renderCloudFiles() {
+    const body = $("#cloud-files-body");
+    const table = body.closest("table");
+    const empty = $("#cloud-empty");
+    const files = state.cloudFiles || [];
+    table.classList.toggle("hidden", files.length === 0);
+    empty.classList.toggle("hidden", files.length > 0);
+    $("#cloud-list-note").textContent = files.length
+      ? `${formatNumber(files.length)} files — select and import.`
+      : "Select a connected provider to browse its files.";
+    body.innerHTML = files
+      .map(
+        (file, index) => `<tr>
+          <td><input type="checkbox" data-cloud-file="${index}"></td>
+          <td><span class="file-name" title="${esc(file.path)}">${esc(file.name)}</span></td>
+          <td class="hide-sm">${formatBytes(file.size)}</td>
+          <td class="hide-md">${file.modified_at ? esc(formatDate(file.modified_at)) : "—"}</td>
+        </tr>`
+      )
+      .join("");
+  }
+
+  async function cloudImport() {
+    const provider = $("#cloud-browse-provider").value;
+    const errorBox = $("#cloud-error-list");
+    errorBox.classList.add("hidden");
+    if (!provider) return showError("cloud-error-list", "Connect a provider first.");
+    const selected = [...document.querySelectorAll("[data-cloud-file]:checked")]
+      .map((checkbox) => state.cloudFiles[Number(checkbox.dataset.cloudFile)])
+      .filter(Boolean);
+    if (!selected.length) return showError("cloud-error-list", "Select files to import.");
+    const button = $("#btn-cloud-import");
+    setBusy(button, true, "Importing");
+    try {
+      const result = await api("/api/cloud/import", {
+        method: "POST",
+        body: { provider, paths: selected.map((file) => file.path) },
+      });
+      toast(
+        result.failed
+          ? `Imported ${formatNumber(result.imported)}, failed ${formatNumber(result.failed)}.`
+          : `Imported ${formatNumber(result.imported)} files (${formatBytes(result.bytes)}) — encrypted on arrival.`,
+        result.failed ? "error" : "success"
+      );
+      await loadCloud();
+    } catch (error) {
+      showError("cloud-error-list", error.message);
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  // ── Remote access & pairing ─────────────────────────────────────────
+
+  async function loadRemote() {
+    const status = await api("/api/remote/status");
+    const pill = $("#remote-pill");
+    const ready = Boolean(status.ready_for_phone);
+    pill.textContent = ready ? "READY" : "LOCAL ONLY";
+    pill.className = `pill durability-state ${ready ? "state-protected" : ""}`;
+    const ts = status.tailscale || {};
+    const urls = [...(status.remote_urls || []), ...(status.local_urls || [])];
+    $("#remote-urls").textContent = urls.length ? urls.join("  ·  ") : "No URLs detected.";
+    // Re-point the QR at the best URL whenever the status changes.
+    const qr = $("#remote-qr");
+    if (urls.length) qr.src = `/api/pairing/qr.png?url=${encodeURIComponent(urls[0])}&v=${Date.now()}`;
+    $("#remote-note").textContent = ready
+      ? `Tailscale is up (${ts.ip}). Scan the QR from your phone on the same tailnet.`
+      : "Install and start Tailscale on this machine, then rescan — the app never opens a public port.";
+    const steps = Array.isArray(status.steps) ? status.steps : [];
+    $("#remote-steps").innerHTML = steps.length
+      ? steps
+          .map(
+            (step) => `<div><span>${esc(step.label)}</span><strong class="inline-status"><span class="status-dot ${step.done ? "ok" : ""}"></span>${step.done ? "Done" : "Pending"}</strong></div>`
+          )
+          .join("")
+      : `<p class="muted">No steps reported.</p>`;
+    const safety = Array.isArray(status.safety) ? status.safety : [];
+    $("#remote-safety").innerHTML = safety.length
+      ? safety.map((line) => `<div><span>${esc(line)}</span></div>`).join("")
+      : `<p class="muted">No safety notes reported.</p>`;
+  }
+
+  // ── Weekly health report ────────────────────────────────────────────
+
+  function renderHealthReport(lastRun, report) {
+    const pill = $("#health-report-pill");
+    pill.textContent = report ? "READY" : "…";
+    pill.className = `pill durability-state ${report ? "state-protected" : ""}`;
+    $("#health-report-last").textContent = lastRun ? `${formatDate(lastRun)} ${formatTime(lastRun)}` : "Never";
+    if (!report) return;
+    const badge = report.badge || {};
+    $("#health-report-badge").textContent = badge.label || badge.overall || "—";
+    const alerts = report.alerts || {};
+    $("#health-report-alerts").textContent = formatNumber(alerts.active_count || 0);
+    const waste = report.waste;
+    $("#health-report-waste").textContent =
+      waste && waste.total_reclaimable_bytes != null ? formatBytes(waste.total_reclaimable_bytes) : "—";
+    const drills = report.drills || {};
+    $("#health-report-note").textContent = drills.last
+      ? `Last drill: ${drills.last.result || "?"} · ${formatNumber(drills.passed || 0)} passed, ${formatNumber(drills.failed || 0)} failed.`
+      : "Drills, badge, alerts, and space — one summary on a schedule.";
+  }
+
+  async function runHealthReportNow() {
+    const button = $("#btn-health-report-run");
+    setBusy(button, true, "Running");
+    try {
+      const result = await api("/api/health/run", { method: "POST" });
+      renderHealthReport(result.report && result.report.generated_at, result.report);
+      toast(result.delivered ? "Report built and delivered." : "Report built.");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function saveHealthReportSettings() {
+    try {
+      const result = await api("/api/health/settings", {
+        method: "POST",
+        body: {
+          enabled: $("#health-report-enabled-input").checked,
+          interval_hours: Number($("#health-report-interval-input").value) || 168,
+          webhook_url: $("#health-report-webhook-input").value.trim() || null,
+        },
+      });
+      $("#health-report-enabled-input").checked = Boolean(result.enabled);
+      $("#health-report-interval-input").value = String(Number(result.interval_hours) || 168);
+      $("#health-report-webhook").textContent = result.webhook_configured ? "Configured" : "Not set";
+      toast("Health report settings saved.");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  // ── Inheritance (dead man's switch) ─────────────────────────────────
+
+  function renderInheritance(status) {
+    const pill = $("#inheritance-pill");
+    pill.textContent = status.enabled ? (status.overdue ? "OVERDUE" : "ARMED") : "OFF";
+    pill.className = `pill durability-state ${status.overdue ? "state-unprotected" : status.enabled ? "state-degraded" : ""}`;
+    $("#inheritance-interval").textContent = status.enabled ? `${formatNumber(status.interval_days)} days` : "—";
+    $("#inheritance-last-checkin").textContent = status.last_check_in ? `${formatDate(status.last_check_in)} ${formatTime(status.last_check_in)}` : "Never";
+    $("#inheritance-due").textContent = status.due_at ? formatDate(status.due_at) : "—";
+    const remaining = status.days_remaining;
+    $("#inheritance-remaining").textContent =
+      remaining == null ? "—" : remaining < 0 ? `${formatNumber(-remaining)} days OVERDUE` : `${formatNumber(remaining)} days`;
+    $("#inheritance-package").textContent = status.package_sealed ? "Sealed" : "Not sealed";
+    $("#inheritance-days-input").value = String(Number(status.interval_days) || 90);
+    // Keep contacts textarea in sync only when empty so typing is not clobbered.
+    if (!$("#inheritance-contacts-input").value && Array.isArray(status.contacts) && status.contacts.length) {
+      $("#inheritance-contacts-input").value = status.contacts
+        .map((contact) => `${contact.name} | ${contact.webhook_url}`)
+        .join("\n");
+    }
+  }
+
+  function parseInheritanceContacts() {
+    return $("#inheritance-contacts-input")
+      .value.split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [name, ...rest] = line.split("|");
+        return { name: (name || "").trim(), webhook_url: rest.join("|").trim() };
+      });
+  }
+
+  async function enableInheritance() {
+    clearError("inheritance-error");
+    const contacts = parseInheritanceContacts();
+    if (!contacts.length) return showError("inheritance-error", "Add at least one contact (Name | URL).");
+    const button = $("#btn-inheritance-enable");
+    setBusy(button, true, "Sealing");
+    try {
+      const status = await api("/api/inheritance/enable", {
+        method: "POST",
+        body: {
+          interval_days: Number($("#inheritance-days-input").value) || 90,
+          release_passphrase: $("#inheritance-passphrase-input").value,
+          contacts,
+        },
+      });
+      $("#inheritance-passphrase-input").value = "";
+      renderInheritance(status);
+      toast("Inheritance switch armed. The release passphrase is never stored — share it with your contacts out-of-band.");
+    } catch (error) {
+      showError("inheritance-error", error.message);
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function inheritanceCheckIn() {
+    try {
+      const status = await api("/api/inheritance/check-in", { method: "POST" });
+      renderInheritance(status);
+      toast("Checked in — the release timer is reset.");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  async function disableInheritance() {
+    const confirmed = await confirmAction(
+      "Disable the inheritance switch?",
+      "The sealed package is destroyed. Contacts will never receive it. You can re-arm later (re-sealed from the current master key).",
+      "Disable switch"
+    );
+    if (!confirmed) return;
+    try {
+      const status = await api("/api/inheritance/disable", { method: "POST", body: {} });
+      renderInheritance(status);
+      toast("Inheritance switch disabled.");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  // ── Content search (decrypt-at-query-time) ──────────────────────────
+
+  async function runContentSearch() {
+    const query = $("#content-search-input").value.trim();
+    const errorBox = $("#content-search-error");
+    errorBox.classList.add("hidden");
+    if (!query) return showError("content-search-error", "Type something to search inside your files.");
+    const button = $("#btn-content-search");
+    setBusy(button, true, "Searching");
+    try {
+      const result = await api("/api/search/content", { method: "POST", body: { query } });
+      renderContentSearch(result);
+    } catch (error) {
+      showError("content-search-error", error.message);
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  function renderContentSearch(result) {
+    const container = $("#content-search-results");
+    const empty = $("#content-search-empty");
+    const results = Array.isArray(result.results) ? result.results : [];
+    empty.classList.toggle("hidden", results.length > 0);
+    if (!results.length) {
+      container.innerHTML = "";
+      empty.querySelector("p").textContent = `No files matched “${result.query}” (${formatNumber(result.scanned)} scanned in ${formatNumber(result.duration_ms)} ms).`;
+      return;
+    }
+    container.innerHTML = results
+      .map(
+        (item) => `<div class="event-row">
+          <span class="status-dot ok"></span>
+          <div>
+            <strong>${esc(item.name)}</strong>
+            <span>${esc(item.path || "/")}${item.truncated ? " · searched first part only" : ""}</span>
+            ${(item.snippets || [])
+              .map((snippet) => `<span class="content-snippet">…${esc(snippet)}…</span>`)
+              .join("")}
+          </div>
+        </div>`
+      )
+      .join("");
+  }
+
+  // ── Downloads quick-add ─────────────────────────────────────────────
+
+  async function quickAddDownloads() {
+    const button = $("#btn-sync-quick-add");
+    setBusy(button, true, "Adding");
+    try {
+      const result = await api("/api/sync/quick-add", { method: "POST", body: {} });
+      toast(
+        result.added
+          ? `Downloads folder added and sync started: ${result.root}`
+          : "Downloads folder was already a sync root.",
+        "success"
+      );
+      await loadSync();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setBusy(button, false);
     }
   }
 })();

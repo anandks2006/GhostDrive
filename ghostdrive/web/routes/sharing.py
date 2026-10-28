@@ -5,6 +5,8 @@ Also serves the zero-knowledge envelope flow: ``POST /api/sharing/envelope``
 creates an envelope link, ``GET /e/{token}`` renders the recipient page, and
 ``/api/public/envelope/{token}[/blob]`` hand the browser the ciphertext it
 decrypts locally with WebCrypto (see services/sharing.py for the layout).
+Burn-after-read envelopes destroy the stored ciphertext after the first
+completed blob fetch; later accesses answer 410 Gone.
 """
 
 import html
@@ -15,6 +17,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from ghostdrive.services import sharing as sharing_service
 from ghostdrive.services import files as files_service
@@ -39,6 +42,9 @@ class CreateEnvelopeLinkRequest(BaseModel):
     ttl_hours: int = 72
     max_downloads: Optional[int] = None
     passphrase: Optional[str] = None
+    # Burn-after-read: destroy the stored ciphertext after the first completed
+    # blob fetch; every later access answers 410 (burn wins over max_downloads).
+    burn_after_read: bool = False
 
 
 def _http_error(exc: Exception) -> HTTPException:
@@ -53,12 +59,16 @@ def _http_error(exc: Exception) -> HTTPException:
 
 
 def _envelope_error(exc: Exception) -> HTTPException:
-    """Envelope endpoints map the shared link errors to 404/403/401.
+    """Envelope endpoints map the shared link errors to 410/404/403/401.
 
     ``_http_error`` would turn PermissionError (expired/revoked/limit) into a
     500, which is wrong for a public recipient-facing endpoint, so the
-    envelope flow gets its own mapping.
+    envelope flow gets its own mapping.  Burned (EnvelopeBurnedError, a
+    PermissionError subclass) must be tested FIRST: it is a terminal 410 Gone,
+    not a recoverable 403.
     """
+    if isinstance(exc, sharing_service.EnvelopeBurnedError):
+        return HTTPException(status_code=410, detail=str(exc))
     if isinstance(exc, FileNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
     if isinstance(exc, PermissionError):
@@ -109,13 +119,22 @@ async def create_envelope_share(req: CreateEnvelopeLinkRequest, request: Request
             ttl_hours=req.ttl_hours,
             max_downloads=req.max_downloads,
             passphrase=req.passphrase,
+            burn_after_read=req.burn_after_read,
         )
         base = str(request.base_url).rstrip("/")
         link["url"] = f"{base}/e/{link['token']}"
-        link["message"] = (
-            "Envelope link created. The passphrase was shown only in this "
-            "response — relay it out-of-band; it is never stored."
-        )
+        if req.burn_after_read:
+            link["message"] = (
+                "Burn-after-read envelope link created. The passphrase was "
+                "shown only in this response — relay it out-of-band. After "
+                "the recipient's FIRST download the ciphertext is destroyed "
+                "and the link returns 410 Gone."
+            )
+        else:
+            link["message"] = (
+                "Envelope link created. The passphrase was shown only in this "
+                "response — relay it out-of-band; it is never stored."
+            )
         return link
     except Exception as exc:
         raise _http_error(exc)
@@ -251,6 +270,11 @@ def envelope_share_page(token: str):
     """Zero-knowledge share page: passphrase field + client-side decryption."""
     try:
         info = sharing_service.verify_envelope_access(token)
+    except sharing_service.EnvelopeBurnedError as exc:
+        # Terminal state — no HTML shell: 410 tells the browser (and a cached
+        # page running receive.js) the link is gone for good, with the
+        # server's own "burned" message in the detail.
+        raise _envelope_error(exc)
     except FileNotFoundError:
         return _page("This share link does not exist.")
     except PermissionError as exc:
@@ -272,7 +296,15 @@ def public_envelope_header(token: str) -> dict:
 
 @public_router.get("/api/public/envelope/{token}/blob")
 async def public_envelope_blob(token: str):
-    """Stream the stored envelope ciphertext — still fully encrypted."""
+    """Stream the stored envelope ciphertext — still fully encrypted.
+
+    Burn-after-read links destroy the stored ciphertext in a BackgroundTask,
+    which starlette runs only AFTER the response body has been fully sent —
+    so the recipient's fetch completes first and the burn cannot corrupt the
+    transfer.  (TestClient runs background tasks synchronously before its
+    ``get()`` returns, which is exactly the real-world ordering.)  If the
+    blob failed to LOAD, nothing is scheduled and nothing is destroyed.
+    """
     try:
         info = sharing_service.verify_envelope_access(token)
         envelope = await sharing_service.load_envelope_blob(info)
@@ -282,9 +314,16 @@ async def public_envelope_blob(token: str):
     # max_downloads behaves exactly like the classic /s/{token} flow.  The
     # existing download routes do not throttle, so neither does this one.
     sharing_service.register_download(token)
+    background = None
+    if info["envelope"].get("burn"):
+        # Burn wins over max_downloads: whatever the remaining budget, this
+        # was the one and only fetch — destroy the server-side copy now that
+        # the last byte has been handed over (see burn_envelope for ordering).
+        background = BackgroundTask(sharing_service.burn_envelope, token)
     return StreamingResponse(
         iter([envelope]),
         media_type="application/octet-stream",
+        background=background,
         headers={
             "Content-Length": str(len(envelope)),
             "Content-Disposition": (

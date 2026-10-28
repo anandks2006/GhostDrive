@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GhostDrive</title>
+  <style>
+    :root {
+      --bg: #151a12;
+      --panel: #1d2418;
+      --accent: #c4f56a;
+      --amber: #e8b84a;
+      --red: #e85d5d;
+      --text: #d8e3cc;
+      --muted: #8b987c;
+    }
+    body {
+      width: 320px;
+      margin: 0;
+      padding: 12px;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      color: var(--accent);
+      letter-spacing: 0.06em;
+    }
+    label {
+      display: block;
+      margin: 8px 0 2px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    input, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid #2c3623;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font: inherit;
+    }
+    input:focus, textarea:focus { outline: 1px solid var(--accent); }
+    textarea { height: 56px; resize: vertical; }
+    button {
+      margin-top: 10px;
+      width: 100%;
+      padding: 7px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--accent);
+      background: transparent;
+      color: var(--accent);
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover { background: #232c1b; }
+    button.secondary { border-color: #2c3623; color: var(--muted); }
+    #status { margin-top: 10px; min-height: 18px; font-size: 12px; color: var(--muted); }
+    #status.ok { color: var(--accent); }
+    #status.warn { color: var(--amber); }
+    #status.err { color: var(--red); }
+    .dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .dot.ok { background: var(--accent); }
+    .dot.err { background: var(--red); }
+  </style>
+</head>
+<body>
+  <h1>GHOSTDRIVE</h1>
+
+  <div id="conn"><span class="dot" id="conn-dot"></span><span id="conn-text">Checking…</span></div>
+
+  <label for="base-url">App URL (loopback only)</label>
+  <input id="base-url" type="text" placeholder="http://127.0.0.1:8000" spellcheck="false" />
+
+  <label for="vault-path">Vault folder</label>
+  <input id="vault-path" type="text" placeholder="browser/" spellcheck="false" />
+
+  <button id="save">Save settings</button>
+  <button id="clipboard" class="secondary">Send clipboard to vault</button>
+
+  <label for="manual">…or paste text here</label>
+  <textarea id="manual" placeholder="Paste (clipboard reads may be blocked without a permission gesture)"></textarea>
+  <button id="send-manual" class="secondary">Send pasted text</button>
+
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

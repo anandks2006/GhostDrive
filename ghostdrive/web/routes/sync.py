@@ -46,6 +46,11 @@ class VersionPruneRequest(BaseModel):
     keep: int | None = None
 
 
+class QuickAddRequest(BaseModel):
+    """Optional override path for the Downloads quick-add; None = discover."""
+    path: str | None = None
+
+
 def _http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, FileNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
@@ -158,6 +163,73 @@ def update_sync_settings(req: SyncSettingsRequest) -> dict:
             clamped = max(sync_service.MIN_INTERVAL_SECONDS, int(req.interval_seconds))
             db.set_setting(sync_service.SETTING_INTERVAL, str(clamped))
         return sync_service.sync_status(db)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _http_error(exc)
+
+
+# ── Downloads quick-add ───────────────────────────────────────────────────────
+
+def _discover_downloads() -> Path:
+    """Best-effort location of the user's Downloads folder.
+
+    Checks the usual per-OS conventions rather than shelling out to a
+    platform API (no subprocess on the hot path); returns a path even when
+    it does not exist so the caller's 400 carries a useful message.
+    """
+    home = Path.home()
+    candidates = [
+        home / "Downloads",                      # Windows / macOS / fallback
+        home / "downloads",                      # case-variant on case-sensitive FS
+    ]
+    # XDG user dirs on Linux: parse the user-dirs file if present.
+    user_dirs = home / ".config" / "user-dirs.dirs"
+    if user_dirs.is_file():
+        try:
+            for line in user_dirs.read_text(encoding="utf-8").splitlines():
+                if line.startswith("XDG_DOWNLOAD_DIR"):
+                    raw = line.split("=", 1)[1].strip().strip('"')
+                    candidates.insert(0, Path(raw.replace("$HOME", str(home))))
+                    break
+        except OSError:
+            pass
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
+
+
+@router.post("/quick-add")
+def quick_add_downloads(req: QuickAddRequest | None = None) -> dict:
+    """One-click auto-vault: add the Downloads folder and turn sync on.
+
+    This is the habit-forming path -- the folder where every browser dumps
+    files is the highest-risk directory on a personal machine, and one click
+    should cover it. Idempotent: if the folder is already a sync root, the
+    status is returned unchanged (``added`` False). ``path`` overrides the
+    automatic discovery (e.g. a redirected Downloads on a secondary drive).
+    """
+    try:
+        db = require_db()
+        target = Path(req.path).expanduser() if req and req.path else _discover_downloads()
+        if not target.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Downloads folder not found: {target}. Use the folder "
+                "manager to pick it manually.",
+            )
+        resolved = _validated_root(str(target))
+        roots = sync_service.get_sync_roots(db)
+        added = resolved not in roots
+        if added:
+            sync_service.set_sync_roots(db, roots + [resolved])
+        # Quick-add implies intent: sync becomes enabled and the scheduler
+        # starts, otherwise nothing would ever watch the folder we just added.
+        db.set_setting(sync_service.SETTING_ENABLED, "true")
+        sync_service.start_sync_scheduler(db)
+        return {"status": "success", "added": added, "root": resolved,
+                "sync": sync_service.sync_status(db)}
     except HTTPException:
         raise
     except Exception as exc:

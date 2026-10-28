@@ -31,7 +31,30 @@ by the local app (see [Security Model](#security-model)).
 - Always-on protection sets that mirror local folders into the vault and re-upload changed files
 - Passcode-protected, expiring public share links — zero-knowledge `/e/{token}`
   envelope links (recommended) or classic `/s/{token}` (server-decrypted)
+- Burn-after-read envelope links: the ciphertext is destroyed after the first
+  download; later visits get a 410 "burned" notice
 - Encrypted secrets vault (passwords, notes, API keys, TOTP)
+- Canary tripwires and a mass-modification alarm: decoy files + rate-based
+  change detection that fire critical alerts (ransomware / hostile-cleanup
+  signals)
+- WORM (append-only) mode per backend: refuse overwrites and deletes at the
+  application layer
+- Air-gap export: periodic encrypted chunk export + signed manifest to an
+  external drive, with verify passes and restore drills run from the export
+- Duplicate & waste report: dedup waste, trash, and version bytes surfaced as
+  "reclaimable"
+- Client-side content search: decrypt-at-query-time, in-memory, never indexed
+  on disk and never sent anywhere
+- Cloud import: pull files from Dropbox / Google Drive / OneDrive through the
+  encrypting pipeline (bring-your-own access token)
+- Inheritance switch (dead man's switch): sealed emergency package released to
+  contacts after N missed check-ins
+- Weekly vault-health report: drills, badge, alerts, and reclaimable space on
+  a schedule (optional webhook delivery)
+- Browser extension (MV3): right-click "Encrypt to GhostDrive" over the
+  loopback API
+- QR phone pairing + safe remote-access helper (Tailscale-first, no exposed
+  ports) and a Prometheus `/metrics` endpoint
 - SQLite-backed analytics, backend health, telemetry, and smart throttling
 - Headless CLI companion for scripts, CI, and notebooks
 
@@ -137,7 +160,19 @@ Features that landed after the phase plan below. Security claims are verified in
 - **Restore drills**: periodic snapshot restore checks with status badge and
   alerting
 - **Sync & history**: auto-vault any number of local folders in real time, each
-  with its own namespace and full version snapshots
+  with its own namespace and full version snapshots; one-click "Vault
+  Downloads" quick-add
+- **Active defense**: canary tripwires, mass-change alarms, WORM backends
+- **Continuity**: air-gap export with signed manifests + restore drills,
+  duplicate/waste report, inheritance (dead man's) switch, weekly health
+  report
+- **Sharing**: burn-after-read envelope links
+- **Reach**: QR phone pairing, Tailscale-first remote-access helper,
+  Prometheus `/metrics`, browser extension, Docker/Unraid/Synology packaging
+- **Trust**: reproducible source builds with Ed25519-signed releases
+  (`scripts/release.py`, `scripts/verify_release.py`; updater verifies
+  signatures when `GHOSTDRIVE_RELEASE_PUBKEY` is set)
+- **Migration**: cloud import from Dropbox / Google Drive / OneDrive
 - **Backends**: S3-compatible object storage
 - **App & ops**: system tray, PWA offline shell, opt-in update checker,
   GitHub Actions CI (new — not yet battle-tested)
@@ -156,3 +191,14 @@ Features that landed after the phase plan below. Security claims are verified in
 | 8 | Sharing + Erasure Coding | Complete |
 | 9 | Testing + Hardening | Complete |
 | 10 | Submission | In progress |
+
+## Guides
+
+| Doc | What it covers |
+|---|---|
+| [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | Assets, adversaries, residual risks |
+| [`docs/TESTING.md`](docs/TESTING.md) | How to run and write the test suite |
+| [`docs/REMOTE_ACCESS.md`](docs/REMOTE_ACCESS.md) | Safe remote access (Tailscale-first), QR pairing, `/metrics` exposure |
+| [`docs/BROWSER_EXTENSION.md`](docs/BROWSER_EXTENSION.md) | Extension install, trust model, API calls |
+| [`docs/REPRODUCIBLE_BUILDS.md`](docs/REPRODUCIBLE_BUILDS.md) | Keygen → build → sign → verify a release |
+| [`packaging/docker/README.md`](packaging/docker/README.md) | Docker/compose self-hosting (also Unraid/Synology under `packaging/`) |

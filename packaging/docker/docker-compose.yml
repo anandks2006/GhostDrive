@@ -1,0 +1,44 @@
+# GhostDrive — self-hosted / NAS deployment via Docker Compose.
+#
+# The loopback story, in one comment (long version in README.md):
+#   ghostdrive/web/server.py hardcodes a 127.0.0.1 bind. The only override in
+#   the codebase is `ghostdrive-cli serve --host`, which the Dockerfile uses to
+#   bind 0.0.0.0 *inside the container's own network namespace*. The `ports:`
+#   mapping below publishes that on THIS machine's loopback only — the same
+#   exposure posture as running GhostDrive on a desktop. Reaching it from
+#   another machine (LAN IP publish, reverse proxy, Tailscale) is a deliberate
+#   edit you make and own; see docs/REMOTE_ACCESS.md for why we insist on that.
+#
+# No top-level `version:` key — it has been obsolete since Compose v2.
+
+services:
+  ghostdrive:
+    build:
+      context: ../..                       # repo root (poetry-core builds the wheel from pyproject.toml)
+      dockerfile: packaging/docker/Dockerfile
+    # Publishing your own image instead of building? Uncomment:
+    # image: ghcr.io/youruser/ghostdrive:latest
+    container_name: ghostdrive
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"              # host-loopback only by default
+      # - "192.168.1.10:8000:8000"        # expose on the LAN — deliberate act; you own the exposure (no TLS!)
+    environment:
+      GHOSTDRIVE_DATA_DIR: /data           # the app's real data-dir override (ghostdrive/utils/platform.py)
+    volumes:
+      - ghostdrive-data:/data              # keystore.json + ghostdrive.db + logs live here
+      # Optional second mount: a plainly-visible folder next to the vault, e.g.
+      # for NAS-level snapshots of exported backups. The app's own backup /
+      # waste / air-gap features operate on the vault data in /data:
+      # - /mnt/user/backup/ghostdrive:/backup
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ghostdrive-data:
+    # Docker stores named volumes under /var/lib/docker/volumes/ on the engine
+    # host. That is NOT a backup location — see README.md ("What you must
+    # back up").

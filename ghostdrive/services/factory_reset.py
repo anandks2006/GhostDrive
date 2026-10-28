@@ -236,6 +236,11 @@ def _stop_background_jobs() -> None:
         ("ghostdrive.services.restore_drills", "stop_drill_scheduler"),
         ("ghostdrive.services.alerts", "stop_alerts_scheduler"),
         ("ghostdrive.services.protection", "stop_watcher"),
+        ("ghostdrive.services.canary", "stop_canary_scheduler"),
+        ("ghostdrive.services.mass_alarm", "stop_mass_alarm_scheduler"),
+        ("ghostdrive.services.inheritance", "stop_inheritance_scheduler"),
+        ("ghostdrive.services.health_report", "stop_health_report_scheduler"),
+        ("ghostdrive.services.airgap", "stop_airgap_scheduler"),
     )
     for module_name, func_name in stops:
         try:

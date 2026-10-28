@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from ghostdrive.services import backends as backend_service
+from ghostdrive.services.context import require_db
 
 logger = logging.getLogger("ghostdrive_web.backends")
 
@@ -29,6 +30,18 @@ class SaveBackendRequest(BaseModel):
     enabled: bool = True
     credentials: Dict[str, Any] = {}
     quota_cap_gb: Optional[float] = 0.0
+    # WORM: refuse deletes/overwrites of this backend's bytes through the app.
+    append_only: bool = False
+
+
+class WormToggleRequest(BaseModel):
+    """Body for POST /api/backends/{backend_id}/worm.
+
+    Toggling OFF is allowed and only relaxes FUTURE deletes: bytes already
+    retained while the flag was on are not restored, and nothing retroactively
+    re-deletes them (their index rows were dropped with the purge).
+    """
+    enabled: bool
 
 
 def _http_error(exc: Exception) -> HTTPException:
@@ -58,7 +71,17 @@ def _resolve_backend_id(provider: str) -> Optional[str]:
 @router.get("/list")
 def list_backends() -> dict:
     try:
-        return backend_service.list_backends_view()
+        view = backend_service.list_backends_view()
+        # The view predates the WORM flag; enrich each card from the DB row so
+        # the UI can show which backends are append-only.
+        db = require_db()
+        flags = {
+            row["id"]: bool(row["append_only"])
+            for row in db.list_backends(include_deprecated=True)
+        }
+        for entry in view.get("configured_backends", []):
+            entry["append_only"] = flags.get(entry["id"], False)
+        return view
     except Exception as exc:
         raise _http_error(exc)
 
@@ -75,7 +98,7 @@ async def test_backend_connectivity(req: TestBackendRequest) -> dict:
 @router.post("/save")
 def save_backend_config(req: SaveBackendRequest) -> dict:
     try:
-        return backend_service.save_backend(
+        result = backend_service.save_backend(
             req.provider,
             req.name,
             req.tier,
@@ -83,6 +106,55 @@ def save_backend_config(req: SaveBackendRequest) -> dict:
             req.credentials,
             req.quota_cap_gb or 0.0,
         )
+        if req.append_only and result.get("backend_id"):
+            # services/backends.py predates the WORM flag; apply it here on the
+            # freshly created row, since this route owns the request model.
+            db = require_db()
+            with db.transaction():
+                db._conn.execute(
+                    "UPDATE backends SET append_only = 1 WHERE id = ?",
+                    (result["backend_id"],),
+                )
+            result["append_only"] = True
+        return result
+    except Exception as exc:
+        raise _http_error(exc)
+
+
+@router.post("/{backend_id}/worm")
+def set_backend_worm(backend_id: str, req: WormToggleRequest) -> dict:
+    """Enable/disable WORM (append-only) mode for one backend.
+
+    While enabled the app accepts writes but refuses to delete or overwrite
+    this backend's chunk bytes (application-level enforcement -- see
+    services/files.py). require_db() implies the vault is unlocked.
+
+    Toggling OFF is allowed: future deletes become possible again, but bytes
+    already retained while the flag was on are NOT restored (their index rows
+    were dropped with the purge) and nothing retroactively re-deletes them.
+    """
+    try:
+        db = require_db()
+        row = db.get_backend(backend_id)
+        if row is None:
+            raise FileNotFoundError(f"Backend {backend_id} not found.")
+        with db.transaction():
+            db._conn.execute(
+                "UPDATE backends SET append_only = ? WHERE id = ?",
+                (1 if req.enabled else 0, backend_id),
+            )
+        return {
+            "status": "success",
+            "backend_id": backend_id,
+            "append_only": bool(req.enabled),
+            "message": (
+                f"Backend {backend_id} is now append-only (WORM): accepts writes, "
+                "refuses deletes and overwrites."
+                if req.enabled
+                else f"Backend {backend_id} is no longer append-only; future deletes "
+                "are allowed (bytes retained while WORM was on are not restored)."
+            ),
+        }
     except Exception as exc:
         raise _http_error(exc)
 
