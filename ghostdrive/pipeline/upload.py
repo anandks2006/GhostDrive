@@ -637,8 +637,30 @@ class ChunkUploader:
         self,
         confirmed_sub_blocks: list[tuple[int, str, str]],
     ) -> None:
-        """Best-effort removal of shards uploaded before a failed commit."""
+        """Best-effort removal of shards uploaded before a failed commit.
+
+        Sub-blocks on a WORM (append-only) backend are left in place: the
+        backend's contract forbids deletion, so a failed upload there leaves
+        orphaned ciphertext rather than violating append-only. This mirrors the
+        skip-WORM behavior in the files/retention delete paths.
+        """
+        if not confirmed_sub_blocks:
+            return
+        try:
+            from ghostdrive.services.files import worm_backend_ids
+
+            worm = worm_backend_ids(self._db)
+        except Exception:
+            # No vault handle (locked/absent): fall through and attempt the
+            # deletes; a WORM backend still refuses at its own layer.
+            worm = set()
         for _, ref_id, b_id in confirmed_sub_blocks:
+            if b_id in worm:
+                logger.info(
+                    "Retaining failed-upload sub-block %s: backend %s is "
+                    "append-only (WORM).", ref_id, b_id,
+                )
+                continue
             try:
                 b_obj = self._active_backends.get(b_id) or self._backend
                 await b_obj.delete(ref_id)
