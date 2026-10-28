@@ -30,7 +30,10 @@ VERSION_KEEP_SETTING = "version_keep"
 
 class SyncSettingsRequest(BaseModel):
     enabled: bool | None = None
+    # Legacy single-root field: replaces the whole list with one folder.
     root: str | None = None
+    # Multi-folder field: replaces the whole list (empty list clears it).
+    roots: list[str] | None = None
     interval_seconds: int | None = None
     on_change: bool | None = None
 
@@ -52,6 +55,29 @@ def _http_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=401, detail=str(exc))
     logger.exception("Sync operation failed: %s", exc)
     return HTTPException(status_code=500, detail=str(exc))
+
+
+def _validated_root(raw: str) -> str:
+    """Validate one candidate sync root; return its resolved path string.
+
+    Raises 400 for an empty/nonexistent/non-directory path and for the
+    feedback-loop guard (app-data overlap), so a bad folder never enters the
+    configured list -- even though the guard also re-runs on every pass.
+    """
+    if not str(raw).strip():
+        raise HTTPException(
+            status_code=400, detail="Sync root folder must not be empty."
+        )
+    root = Path(raw).expanduser()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sync root does not exist or is not a directory: {raw}",
+        )
+    guard = sync_service.feedback_guard(root)
+    if guard:
+        raise HTTPException(status_code=400, detail=guard)
+    return str(root.resolve())
 
 
 @router.get("/status")
@@ -103,17 +129,21 @@ async def run_sync() -> dict:
 
 @router.post("/settings")
 def update_sync_settings(req: SyncSettingsRequest) -> dict:
-    """Persist sync settings. A provided root must exist and be a directory."""
+    """Persist sync settings.
+
+    ``roots`` replaces the full auto-vault folder list (each entry must
+    exist, be a directory, and pass the feedback-loop guard; ``[]`` clears
+    the list). The legacy ``root`` field replaces the list with that single
+    folder. Both are optional alongside the scheduler settings.
+    """
     try:
         db = require_db()
-        if req.root is not None:
-            root = Path(req.root).expanduser()
-            if not root.exists() or not root.is_dir():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Sync root does not exist or is not a directory: {req.root}",
-                )
-            db.set_setting(sync_service.SETTING_ROOT, str(root.resolve()))
+        if req.roots is not None:
+            sync_service.set_sync_roots(
+                db, [_validated_root(entry) for entry in req.roots]
+            )
+        elif req.root is not None:
+            sync_service.set_sync_roots(db, [_validated_root(req.root)])
         if req.enabled is not None:
             db.set_setting(
                 sync_service.SETTING_ENABLED, "true" if req.enabled else "false"

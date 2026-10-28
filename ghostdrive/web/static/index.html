@@ -421,7 +421,7 @@
 
         <section id="view-sync" class="view">
           <div class="page-head">
-            <div><span class="eyebrow">Automation</span><h2>Sync &amp; versions</h2><p>Mirror a local folder into the vault and keep a full version chain.</p></div>
+            <div><span class="eyebrow">Automation</span><h2>Sync &amp; versions</h2><p>Auto-vault any number of local folders and keep a full version chain.</p></div>
             <div class="head-actions">
               <button class="btn btn-secondary" id="btn-sync-start" type="button">Start</button>
               <button class="btn btn-secondary" id="btn-sync-stop" type="button">Stop</button>
@@ -435,7 +435,7 @@
                 <span id="sync-state-pill" class="pill durability-state">OFF</span>
               </div>
               <div class="state-list">
-                <div><span>Root</span><strong id="sync-root">—</strong></div>
+                <div><span>Folders</span><strong id="sync-root">—</strong></div>
                 <div><span>Enabled</span><strong class="inline-status"><span class="status-dot" id="sync-enabled-dot"></span><span id="sync-enabled-text">—</span></strong></div>
                 <div><span>Scheduler</span><strong class="inline-status"><span class="status-dot" id="sync-running-dot"></span><span id="sync-running-text">Idle</span></strong></div>
                 <div><span>Interval</span><strong id="sync-interval">—</strong></div>
@@ -444,7 +444,16 @@
               <div class="divider"></div>
               <form id="sync-settings-form" class="settings-form">
                 <span class="eyebrow form-eyebrow">Settings</span>
-                <label class="field"><span>Root folder</span><input id="sync-root-input" type="text" placeholder="C:\Users\You\Documents" autocomplete="off"></label>
+                <div class="field">
+                  <span>Auto-vault folders</span>
+                  <div id="sync-roots-list" class="sync-roots-list">
+                    <p class="muted sync-roots-empty">No folders yet — add one below to start auto-vaulting.</p>
+                  </div>
+                  <div class="add-root-row">
+                    <input id="sync-root-input" type="text" placeholder="C:\Users\You\Documents" autocomplete="off" aria-label="Folder path to auto-vault">
+                    <button class="btn btn-secondary btn-sm" id="btn-sync-add-root" type="button"><svg class="icon"><use href="#i-plus"/></svg> Add folder</button>
+                  </div>
+                </div>
                 <div class="field-grid">
                   <label class="field"><span>Interval (seconds)</span><input id="sync-interval-input" type="number" min="15" step="15" value="60"></label>
                   <label class="setting-row"><div><strong>Enabled</strong><span>Run the scheduler automatically.</span></div><span class="switch"><input type="checkbox" id="sync-enabled-input"><i></i></span></label>

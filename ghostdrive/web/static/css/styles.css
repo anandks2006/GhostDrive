@@ -3371,3 +3371,79 @@ select {
 .danger-notice li {
   margin: 2px 0;
 }
+
+/* ── Sync folder manager ───────────────────────────────────────────────────── */
+
+.sync-roots-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.sync-roots-empty {
+  margin: 0;
+  font-size: 12px;
+}
+
+.sync-root-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+
+.sync-root-chip > .icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.sync-root-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+}
+
+.sync-root-count {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.sync-root-chip .sync-root-remove {
+  flex: 0 0 auto;
+  padding: 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.sync-root-chip .sync-root-remove:hover {
+  color: var(--danger);
+}
+
+.add-root-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.add-root-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.add-root-row .btn {
+  flex: 0 0 auto;
+}

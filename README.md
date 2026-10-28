@@ -136,7 +136,8 @@ Features that landed after the phase plan below. Security claims are verified in
   immutable offsite snapshot copies, withholding-backend detection
 - **Restore drills**: periodic snapshot restore checks with status badge and
   alerting
-- **Sync & history**: real-time folder sync with version snapshots
+- **Sync & history**: auto-vault any number of local folders in real time, each
+  with its own namespace and full version snapshots
 - **Backends**: S3-compatible object storage
 - **App & ops**: system tray, PWA offline shell, opt-in update checker,
   GitHub Actions CI (new — not yet battle-tested)

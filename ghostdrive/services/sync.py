@@ -1,7 +1,8 @@
-"""Real-time folder sync: watch a sync root and mirror changes into the vault.
+"""Auto-vault: watch any number of local folders and mirror them into the vault.
 
-One pass (``run_sync_pass``) walks the configured sync root and reconciles it
-against the index by relative path:
+The user configures an unlimited list of sync roots (``sync_roots``). One pass
+(``run_sync_pass``) walks **every** configured root and reconciles each against
+the index by relative path:
 
 * new local file        -> full upload through ``files_service.upload_stream``
   (the exact service path the web/CLI use -- never ChunkUploader directly);
@@ -14,6 +15,17 @@ against the index by relative path:
   30-day retention is the natural ransomware undo, and versions on top of it
   make even a purge-then-regret recoverable while history remains.
 
+Root isolation (multi-folder correctness): each root owns a *namespace* -- its
+files live in the vault under ``/<slug>/<rel>`` and its change-detector state
+is keyed by that slug (``root_slug`` derives the slug from the folder's own
+resolved path, so it never shifts when other roots are added or removed).
+Consequences by design:
+
+* two watched folders containing ``a/b.txt`` each stay distinct rows;
+* a deletion in root A can only ever trash root A's rows;
+* a bad root (guard violation, missing directory) is reported as an error for
+  that root while every other root still syncs in the same pass.
+
 Change detection is cheap by design: (size, mtime_ns, BLAKE3 of the first +
 last 64 KiB). Size+mtime gate first, so an untouched file costs one stat and a
 <=128 KiB read per pass; the edge fingerprint catches rewrites that preserve
@@ -24,12 +36,17 @@ seconds-long sync loop, versus hashing entire gigabyte files every pass.
 Feedback-loop guard: the vault's own app-data dir (ciphertext, WAL, snapshots)
 must never be a sync root or sit inside one -- re-uploading freshly written
 ciphertext would create "new" files, write more ciphertext, and grow without
-bound.
+bound. The guard runs per root: one offending folder does not disable the
+others.
 
 There is no extra watcher dependency: the interval loop itself is the change
 detector. ``sync_on_change`` means the loop polls at the short interval while
 sync is enabled (the mtime scan is cheap), versus the long configured interval
 otherwise.
+
+Backward compatibility: the legacy single-root ``sync_root`` setting is still
+read as a one-element root list (and written back as ``sync_roots[0]``), and
+the legacy flat detector state is migrated to per-root keys on load.
 """
 
 from __future__ import annotations
@@ -52,13 +69,18 @@ logger = logging.getLogger("ghostdrive.services.sync")
 
 # ── Settings keys ─────────────────────────────────────────────────────────────
 SETTING_ENABLED = "sync_enabled"              # "true" / "false"  (default false)
-SETTING_ROOT = "sync_root"                    # absolute local folder (default "")
+SETTING_ROOT = "sync_root"                    # legacy single root (mirrors sync_roots[0])
+SETTING_ROOTS = "sync_roots"                  # JSON list of absolute folders (default "[]")
 SETTING_INTERVAL = "sync_interval_seconds"    # default "60", clamped to >= 15
 SETTING_ON_CHANGE = "sync_on_change"          # "true" / "false"  (default true)
 SETTING_VERSION_KEEP = "sync_version_keep"    # versions kept per file (default "10")
 SETTING_LAST_RUN_AT = "sync_last_run_at"      # ISO-8601 of last finished pass
-SETTING_LAST_RESULT = "sync_last_result"      # JSON counters of last pass
-SETTING_STATE = "sync_state"                  # JSON per-relpath change detector
+SETTING_LAST_RESULT = "sync_last_result"      # JSON counters of last pass (incl. per_root)
+SETTING_STATE = "sync_state"                  # JSON detector state, see _save_state
+
+#: Detector-state format version. v2 = {"v": 2, "roots": {slug: {rel: fp}}};
+#: anything older is the legacy flat {rel: fp} map of the single-root era.
+STATE_VERSION = 2
 
 DEFAULT_TIER = "IMPORTANT"
 MIN_INTERVAL_SECONDS = 15
@@ -93,6 +115,80 @@ def _setting_int(db: Any, key: str, default: int) -> int:
         return int(db.get_setting(key, str(default)) or default)
     except (TypeError, ValueError):
         return default
+
+
+# ── Root list ─────────────────────────────────────────────────────────────────
+
+def root_slug(root: Any) -> str:
+    """Stable per-folder vault namespace segment for one sync root.
+
+    The slug depends only on the folder's own resolved, case-normalized path
+    -- never on which other roots are configured -- so files from ``C:\\Docs``
+    live under ``/Docs-3f2a9b/...`` forever, and adding/removing another
+    watched folder can never remap existing rows or detector state.
+
+    The readable basename prefix keeps vault paths human-meaningful; a 4-byte
+    BLAKE3 of the full path disambiguates same-named folders (``C:\\Docs``
+    vs ``D:\\Docs``) and the same folder typed with different case resolves
+    to the same slug (``os.path.normcase``).
+    """
+    try:
+        resolved = Path(root).expanduser().resolve()
+    except OSError:
+        resolved = Path(root).expanduser()
+    normalized = os.path.normcase(str(resolved))
+    raw_name = resolved.name or "drive"          # drive roots ("/", "C:\\") have no name
+    safe_name = "".join(
+        ch if (ch.isalnum() or ch in "._-") else "_" for ch in raw_name
+    ).strip(" .")[:48] or "drive"
+    digest = blake3.blake3(normalized.encode("utf-8")).hexdigest(length=4)
+    return f"{safe_name}-{digest}"
+
+
+def get_sync_roots(db: Any) -> list[str]:
+    """Configured sync roots, in configuration order (empty list = none).
+
+    Reads ``sync_roots`` (JSON list). When it holds nothing, falls back to the
+    legacy single-root ``sync_root`` setting, so pre-multi-folder
+    configurations keep working without a data migration step.
+    """
+    raw = str(db.get_setting(SETTING_ROOTS, "") or "").strip()
+    roots: list[str] = []
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            roots = [str(item) for item in parsed if str(item).strip()]
+    if not roots:
+        legacy = str(db.get_setting(SETTING_ROOT, "") or "").strip()
+        if legacy:
+            roots = [legacy]
+    return roots
+
+
+def set_sync_roots(db: Any, roots: list[str]) -> list[str]:
+    """Replace the configured root list (trimmed, deduplicated, in order).
+
+    Also mirrors the first root into the legacy ``sync_root`` key so any older
+    reader of the single-root setting stays consistent ("" when the list is
+    cleared). Returns the stored list.
+    """
+    seen: set[str] = set()
+    stored: list[str] = []
+    for root in roots:
+        candidate = str(root).strip()
+        if not candidate:
+            continue
+        key = os.path.normcase(str(Path(candidate).expanduser()))
+        if key in seen:
+            continue
+        seen.add(key)
+        stored.append(candidate)
+    db.set_setting(SETTING_ROOTS, json.dumps(stored))
+    db.set_setting(SETTING_ROOT, stored[0] if stored else "")
+    return stored
 
 
 # ── Filesystem scanning ───────────────────────────────────────────────────────
@@ -178,16 +274,18 @@ def _detect_change(entry: Optional[dict], fp: dict) -> tuple[bool, str]:
     return False, "unchanged"
 
 
-def _virtual_path(rel: str) -> str:
-    """Index path for a POSIX relative path under the sync root (root -> '/')."""
-    return "/" + rel if rel else "/"
+def _virtual_path(slug: str, rel: str) -> str:
+    """Vault path for a file under one root's namespace ('/slug' + '/' + rel)."""
+    base = "/" + slug
+    return f"{base}/{rel}" if rel else base
 
 
-def _destination_for(rel: str) -> str:
-    """Parent directory in the vault for a relative path ('a/b.txt' -> '/a')."""
+def _destination_for(slug: str, rel: str) -> str:
+    """Parent directory in the vault for a relative path ('a/b.txt' -> '/slug/a')."""
+    base = "/" + slug
     if "/" not in rel:
-        return "/"
-    return "/" + rel.rsplit("/", 1)[0]
+        return base
+    return base + "/" + rel.rsplit("/", 1)[0]
 
 
 def _find_live_rows(db: Any, path: str):
@@ -205,18 +303,53 @@ def _find_live_rows(db: Any, path: str):
 
 
 def _load_state(db: Any) -> dict:
+    """Detector state as ``{slug: {rel: fingerprint}}``.
+
+    Current format (v2): ``{"v": 2, "roots": {slug: {rel: fp}}}``. The legacy
+    flat ``{rel: fp}`` map of the single-root era is migrated in memory --
+    re-homed under the legacy ``sync_root``'s slug -- so upgrading does not
+    force a full re-upload; the next pass persists the v2 format.
+    """
     raw = str(db.get_setting(SETTING_STATE, "") or "")
     if not raw:
         return {}
     try:
         data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
     except json.JSONDecodeError:
         logger.warning("Sync detector state unreadable; rescanning from scratch.")
         return {}
+    if not isinstance(data, dict):
+        return {}
+    if "v" in data or "roots" in data:
+        roots_map = data.get("roots")
+        if not isinstance(roots_map, dict):
+            return {}
+        return {
+            str(slug): {
+                str(rel): fp for rel, fp in sub.items() if isinstance(fp, dict)
+            }
+            for slug, sub in roots_map.items()
+            if isinstance(sub, dict)
+        }
+    # Legacy flat format: top-level rel paths -> fingerprints.
+    flat = {str(rel): fp for rel, fp in data.items() if isinstance(fp, dict)}
+    if not flat:
+        return {}
+    legacy_root = str(db.get_setting(SETTING_ROOT, "") or "").strip()
+    if legacy_root:
+        logger.debug("Migrating legacy single-root sync state to per-folder keys.")
+        return {root_slug(legacy_root): flat}
+    return {}
 
 
-def _feedback_guard(root: Path) -> Optional[str]:
+def _save_state(db: Any, state: dict) -> None:
+    """Persist detector state in the current (v2) format."""
+    db.set_setting(
+        SETTING_STATE, json.dumps({"v": STATE_VERSION, "roots": state})
+    )
+
+
+def feedback_guard(root: Path) -> Optional[str]:
     """Refuse roots that overlap the vault's own app-data directory.
 
     GhostDrive writes ciphertext under app-data (local backend vault, WAL,
@@ -225,6 +358,10 @@ def _feedback_guard(root: Path) -> Optional[str]:
     that also leaks encrypted blobs into the sync as "new" content. Both
     directions are refused: root == app-data, root inside it, or app-data
     inside root.
+
+    Public: the settings route validates candidate roots with it before
+    persisting, so a bad folder is rejected at configuration time (and the
+    per-root check still runs every pass for roots that went bad afterwards).
     """
     from ghostdrive.web.state import state
 
@@ -268,12 +405,15 @@ async def _trash_row(db: Any, row: Any) -> None:
 def sync_status(db: Any = None) -> dict:
     """Current sync configuration and runtime state.
 
-    Returns keys: enabled, root, interval_seconds, on_change, running
-    (scheduler task alive), last_run_at, last_result (persisted pass counters:
-    scanned/uploaded/unchanged/versioned/trashed/errors/duration_ms), watched.
+    Returns keys: enabled, root (legacy: first root or ""), roots (all
+    configured folders), root_details ([{path, slug, tracked}] -- tracked =
+    detector entries, i.e. files being watched per folder), interval_seconds,
+    on_change, running (scheduler task alive), last_run_at, last_result
+    (persisted pass counters: scanned/uploaded/unchanged/versioned/trashed/
+    errors/duration_ms/per_root), watched.
     """
     db = _resolve_db(db)
-    root = str(db.get_setting(SETTING_ROOT, "") or "")
+    roots = get_sync_roots(db)
     interval = max(MIN_INTERVAL_SECONDS, _setting_int(db, SETTING_INTERVAL, 60))
     on_change = _setting_bool(db, SETTING_ON_CHANGE, "true")
     enabled = _setting_bool(db, SETTING_ENABLED, "false")
@@ -287,25 +427,42 @@ def sync_status(db: Any = None) -> dict:
             last_result = parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
             last_result = None
+    state = _load_state(db)
+    root_details = []
+    for path in roots:
+        slug = root_slug(path)
+        root_details.append(
+            {"path": path, "slug": slug, "tracked": len(state.get(slug, {}))}
+        )
     return {
         "enabled": enabled,
-        "root": root,
+        "root": roots[0] if roots else "",
+        "roots": roots,
+        "root_details": root_details,
         "interval_seconds": interval,
         "on_change": on_change,
         "running": running,
         "last_run_at": last_run_at,
         "last_result": last_result,
-        "watched": bool(enabled and on_change and root),
+        "watched": bool(enabled and on_change and roots),
     }
 
 
 # ── One-shot pass ─────────────────────────────────────────────────────────────
 
-def _finish(db: Any, counters: dict, errors: list[str], started: float, now: Optional[Any]) -> dict:
+def _finish(
+    db: Any,
+    counters: dict,
+    errors: list[str],
+    started: float,
+    now: Optional[Any],
+    per_root: Optional[list] = None,
+) -> dict:
     result = {
         **counters,
         "errors": errors,
         "duration_ms": int((time.perf_counter() - started) * 1000),
+        "per_root": per_root or [],
     }
     try:
         db.set_setting(SETTING_LAST_RESULT, json.dumps(result))
@@ -318,59 +475,30 @@ def _finish(db: Any, counters: dict, errors: list[str], started: float, now: Opt
     return result
 
 
-async def run_sync_pass(
-    db: Any = None,
-    objects: Optional[dict] = None,
-    root: Optional[Path] = None,
-    now: Optional[Any] = None,
-) -> dict:
-    """Reconcile the sync root against the index once (see module docstring).
+async def _sync_root(
+    db: Any,
+    root: Path,
+    slug: str,
+    state: dict,
+    counters: dict,
+    errors: list[str],
+    now: Optional[Any],
+) -> None:
+    """Reconcile ONE root (see module docstring) into its namespace.
 
-    ``objects`` may carry pre-built backend objects; the upload and trash
-    paths build their own via services.context so this pass behaves exactly
-    like a manual web/CLI upload.
-
-    Returns: {"scanned", "uploaded", "unchanged", "versioned", "trashed",
-              "errors": [str, ...], "duration_ms"}. Guard violations and
-              unusable roots are reported as error entries with zero uploads
-              instead of raising, so a scheduled pass always survives.
+    ``state`` is this root's own ``{rel: fingerprint}`` map (mutated in
+    place); ``counters``/``errors`` are this root's own, so the caller can
+    report them per root before merging into the pass totals. Every path --
+    upload destination, version snapshot, trash lookup -- carries the slug,
+    which is what keeps roots hermetic from each other.
     """
-    started = time.perf_counter()
-    counters = {
-        "scanned": 0,
-        "uploaded": 0,
-        "unchanged": 0,
-        "versioned": 0,
-        "trashed": 0,
-    }
-    errors: list[str] = []
-    db = _resolve_db(db)
-    _ = objects  # see docstring: upload/trash resolve backends themselves
-
-    if root is None:
-        configured = str(db.get_setting(SETTING_ROOT, "") or "").strip()
-        root = Path(configured) if configured else None
-    if root is None:
-        errors.append("Sync root is not configured.")
-        return _finish(db, counters, errors, started, now)
-    root = Path(root)
-
-    guard = _feedback_guard(root)
-    if guard:
-        errors.append(guard)
-        return _finish(db, counters, errors, started, now)
-    if not root.exists() or not root.is_dir():
-        errors.append(f"Sync root is not a directory: {root}")
-        return _finish(db, counters, errors, started, now)
-
-    state = _load_state(db)
     seen: set[str] = set()
 
     for path in _iter_files(root):
         rel = path.relative_to(root).as_posix()
         seen.add(rel)
         counters["scanned"] += 1
-        vpath = _virtual_path(rel)
+        vpath = _virtual_path(slug, rel)
         try:
             fp = _fingerprint(path)
             rows = _find_live_rows(db, vpath)
@@ -379,7 +507,7 @@ async def run_sync_pass(
             if not rows:
                 # New file -> full upload through the shared service entrypoint.
                 await files_service.upload_stream(
-                    path, path.name, None, DEFAULT_TIER, _destination_for(rel)
+                    path, path.name, None, DEFAULT_TIER, _destination_for(slug, rel)
                 )
                 state[rel] = fp
                 counters["uploaded"] += 1
@@ -408,7 +536,7 @@ async def run_sync_pass(
                 counters["versioned"] += 1
 
             await files_service.upload_stream(
-                path, path.name, None, DEFAULT_TIER, _destination_for(rel)
+                path, path.name, None, DEFAULT_TIER, _destination_for(slug, rel)
             )
             counters["uploaded"] += 1
             state[rel] = fp
@@ -425,10 +553,13 @@ async def run_sync_pass(
             logger.warning("Sync failed for %s: %s", rel, exc)
 
     # Locally deleted files: snapshot, then Trash -- never an immediate purge.
+    # Only THIS root's detector keys are considered, so a file disappearing
+    # from root A can never touch root B's rows even when the relative paths
+    # are identical.
     for rel in list(state.keys()):
         if rel in seen:
             continue
-        vpath = _virtual_path(rel)
+        vpath = _virtual_path(slug, rel)
         try:
             rows = _find_live_rows(db, vpath)
             if rows:
@@ -451,8 +582,82 @@ async def run_sync_pass(
             errors.append(f"{rel}: {exc}")
             logger.warning("Sync trash failed for %s: %s", rel, exc)
 
-    db.set_setting(SETTING_STATE, json.dumps(state))
-    return _finish(db, counters, errors, started, now)
+
+async def run_sync_pass(
+    db: Any = None,
+    objects: Optional[dict] = None,
+    root: Optional[Path] = None,
+    now: Optional[Any] = None,
+) -> dict:
+    """Reconcile the configured sync roots against the index once.
+
+    With ``root`` given, only that folder is reconciled (manual/one-shot
+    usage); otherwise every folder in ``sync_roots`` is processed, in
+    configuration order. Roots are isolated: a root that fails validation
+    (guard violation, missing directory) is recorded as an error while the
+    remaining roots still sync. A root removed from the configuration keeps
+    its vaulted rows and detector state untouched (they simply stop being
+    synced -- removal is not deletion).
+
+    ``objects`` may carry pre-built backend objects; the upload and trash
+    paths build their own via services.context so this pass behaves exactly
+    like a manual web/CLI upload.
+
+    Returns: {"scanned", "uploaded", "unchanged", "versioned", "trashed",
+              "errors": [str, ...], "duration_ms", "per_root": [{"root",
+              "slug", counters..., "errors"}, ...]}. ``scanned`` and friends
+              are aggregates across all roots; guard violations and unusable
+              roots appear in ``errors`` and in their ``per_root`` entry with
+              zero uploads instead of raising, so a scheduled pass survives.
+    """
+    started = time.perf_counter()
+    counters = {
+        "scanned": 0,
+        "uploaded": 0,
+        "unchanged": 0,
+        "versioned": 0,
+        "trashed": 0,
+    }
+    errors: list[str] = []
+    per_root: list[dict] = []
+    db = _resolve_db(db)
+    _ = objects  # see docstring: upload/trash resolve backends themselves
+
+    if root is not None:
+        roots = [str(Path(root))]
+    else:
+        roots = get_sync_roots(db)
+    if not roots:
+        errors.append("Sync root is not configured.")
+        return _finish(db, counters, errors, started, now, per_root)
+
+    state = _load_state(db)
+    for configured in roots:
+        rpath = Path(configured)
+        slug = root_slug(rpath)
+        root_counters = {key: 0 for key in counters}
+        root_errors: list[str] = []
+
+        guard = feedback_guard(rpath)
+        if guard:
+            root_errors.append(guard)
+        elif not rpath.exists() or not rpath.is_dir():
+            root_errors.append(f"Sync root is not a directory: {rpath}")
+        else:
+            await _sync_root(
+                db, rpath, slug, state.setdefault(slug, {}),
+                root_counters, root_errors, now,
+            )
+
+        errors.extend(root_errors)
+        per_root.append(
+            {"root": str(rpath), "slug": slug, **root_counters, "errors": root_errors}
+        )
+        for key in counters:
+            counters[key] += root_counters[key]
+
+    _save_state(db, state)
+    return _finish(db, counters, errors, started, now, per_root)
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────

@@ -590,6 +590,20 @@
     $("#btn-sync-stop").addEventListener("click", stopSyncScheduler);
     $("#btn-sync-run").addEventListener("click", runSyncNow);
     $("#sync-settings-form").addEventListener("submit", saveSyncSettings);
+    $("#btn-sync-add-root").addEventListener("click", addSyncRoot);
+    // Enter in the folder input adds the folder instead of submitting the
+    // scheduler-settings form.
+    $("#sync-root-input").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        addSyncRoot();
+      }
+    });
+    // Chips re-render on every status load, so remove buttons are delegated.
+    $("#sync-roots-list").addEventListener("click", (event) => {
+      const button = event.target.closest(".sync-root-remove");
+      if (button) removeSyncRoot(Number(button.dataset.rootIndex));
+    });
     $("#btn-load-versions").addEventListener("click", loadVersions);
     $("#btn-prune-versions").addEventListener("click", pruneVersions);
     $("#versions-body").addEventListener("click", handleVersionAction);
@@ -1423,11 +1437,15 @@
     if (!status) return;
     const enabled = Boolean(status.enabled);
     const running = Boolean(status.running);
-    $("#sync-status-summary").textContent = status.root
-      ? `Watching ${status.root} every ${formatNumber(status.interval_seconds)} seconds.`
-      : "Set a root folder to start mirroring a local folder.";
-    $("#sync-root").textContent = status.root || "Not set";
-    $("#sync-root-input").value = status.root || "";
+    const roots = Array.isArray(status.roots) ? status.roots : [];
+    $("#sync-status-summary").textContent = roots.length
+      ? `Auto-vaulting ${formatNumber(roots.length)} folder${roots.length === 1 ? "" : "s"} every ${formatNumber(status.interval_seconds)} seconds.`
+      : "Add a folder below to start auto-vaulting local files.";
+    $("#sync-root").textContent = roots.length
+      ? roots.length === 1
+        ? roots[0]
+        : `${formatNumber(roots.length)} folders`
+      : "Not set";
     $("#sync-interval-input").value = String(Number(status.interval_seconds) || 60);
     $("#sync-enabled-input").checked = enabled;
     $("#sync-enabled-dot").className = `status-dot ${enabled ? "ok" : ""}`;
@@ -1452,6 +1470,103 @@
       ? `Last pass ${formatDate(status.last_run_at)} in ${formatNumber(result.duration_ms || 0)} ms.` +
         (errors.length ? ` First error: ${errors[0]}` : "")
       : "No sync pass has run yet.";
+    renderSyncRoots();
+  }
+
+  function renderSyncRoots() {
+    const list = $("#sync-roots-list");
+    if (!list) return;
+    const status = state.syncStatus || {};
+    const details = Array.isArray(status.root_details) ? status.root_details : [];
+    if (!details.length) {
+      list.innerHTML = `<p class="muted sync-roots-empty">No folders yet — add one below to start auto-vaulting.</p>`;
+      return;
+    }
+    list.innerHTML = details
+      .map(
+        (detail, index) => `
+      <div class="sync-root-chip" title="${esc(detail.path)}">
+        <svg class="icon"><use href="#i-files"/></svg>
+        <span class="sync-root-path">${esc(detail.path)}</span>
+        <span class="sync-root-count">${formatNumber(detail.tracked || 0)} files</span>
+        <button class="icon-button sync-root-remove" type="button" data-root-index="${index}" aria-label="Stop auto-vaulting this folder"><svg class="icon"><use href="#i-close"/></svg></button>
+      </div>`
+      )
+      .join("");
+  }
+
+  async function saveSyncRoots(roots, successMessage) {
+    // Every folder in the list is re-validated by the server; the response
+    // carries the canonical status which re-renders the chips.
+    const status = await api("/api/sync/settings", {
+      method: "POST",
+      body: { roots },
+    });
+    state.syncStatus = status;
+    renderSyncStatus();
+    toast(successMessage);
+  }
+
+  async function currentSyncRoots() {
+    // Never build a replacement list from an unloaded status: it would wipe
+    // folders the server already knows about.
+    if (!state.syncStatus) {
+      state.syncStatus = await api("/api/sync/status");
+    }
+    const roots = state.syncStatus.roots;
+    return Array.isArray(roots) ? roots : [];
+  }
+
+  async function addSyncRoot() {
+    clearError("sync-settings-error");
+    const input = $("#sync-root-input");
+    const path = input.value.trim();
+    if (!path) {
+      showError("sync-settings-error", "Enter a folder path to auto-vault.");
+      input.focus();
+      return;
+    }
+    let current;
+    try {
+      current = await currentSyncRoots();
+    } catch (error) {
+      showError("sync-settings-error", error.message);
+      return;
+    }
+    const button = $("#btn-sync-add-root");
+    setBusy(button, true, "Adding");
+    try {
+      await saveSyncRoots([...current, path], `Now auto-vaulting ${path}.`);
+      input.value = "";
+    } catch (error) {
+      showError("sync-settings-error", error.message);
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  async function removeSyncRoot(index) {
+    clearError("sync-settings-error");
+    let current;
+    try {
+      current = await currentSyncRoots();
+    } catch (error) {
+      showError("sync-settings-error", error.message);
+      return;
+    }
+    const target = current[index];
+    if (!target) return;
+    const confirmed = await confirmAction(
+      "Stop auto-vaulting this folder?",
+      `${target} will no longer be watched. Its already-vaulted copies stay in the vault (nothing is deleted).`,
+      "Stop watching"
+    );
+    if (!confirmed) return;
+    try {
+      await saveSyncRoots(current.filter((_, i) => i !== index), `Stopped auto-vaulting ${target}.`);
+    } catch (error) {
+      showError("sync-settings-error", error.message);
+    }
   }
 
   function renderSyncFileOptions() {
@@ -1515,18 +1630,14 @@
   async function saveSyncSettings(event) {
     event.preventDefault();
     clearError("sync-settings-error");
-    const root = $("#sync-root-input").value.trim();
-    if (!root) {
-      showError("sync-settings-error", "Enter a sync root folder.");
-      return;
-    }
     const button = $("#btn-sync-save");
     setBusy(button, true, "Saving");
     try {
+      // Folder membership has its own add/remove controls; this form only
+      // persists the scheduler settings.
       await api("/api/sync/settings", {
         method: "POST",
         body: {
-          root,
           interval_seconds: Number($("#sync-interval-input").value) || 60,
           enabled: $("#sync-enabled-input").checked,
         },
