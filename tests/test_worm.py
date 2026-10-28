@@ -432,3 +432,74 @@ def test_retention_dedup_still_deletes_non_worm_loser(tmp_path):
         assert backends == {worm_id}
     finally:
         db.close()
+
+
+# ── 8. Failed-upload rollback: WORM sub-blocks are retained ───────────────────
+
+def test_upload_rollback_skips_worm_backend_deletes(tmp_path):
+    """ChunkUploader._delete_confirmed_sub_blocks (failed/cancelled upload
+    rollback) never calls backend.delete() for shards on a WORM backend: the
+    orphaned ciphertext is the honest cost of append-only, and a normal
+    backend's shards are still cleaned up."""
+    from ghostdrive.pipeline.upload import ChunkUploader
+
+    db = _make_db(tmp_path, "worm_rollback.db")
+    try:
+        worm_id = str(uuid.uuid4())
+        plain_id = str(uuid.uuid4())
+        _seed_backend(db, worm_id, append_only=1)
+        _seed_backend(db, plain_id, append_only=0)
+
+        worm_stub = _RecordingBackend()
+        plain_stub = _RecordingBackend()
+        default_stub = _RecordingBackend()
+
+        uploader = ChunkUploader(
+            db=db,
+            backend=default_stub,
+            master_key=os.urandom(32),
+            hkdf_salt=os.urandom(16),
+            nonce_manager=None,          # unused by rollback
+            active_backends={worm_id: worm_stub, plain_id: plain_stub},
+        )
+
+        # A failed upload that had confirmed sub-blocks on both backends.
+        confirmed = [
+            (0, "ref-worm-shard", worm_id),
+            (1, "ref-plain-shard", plain_id),
+            (2, "ref-unmapped-shard", None),  # falls back to default backend
+        ]
+        asyncio.run(uploader._delete_confirmed_sub_blocks(confirmed))
+
+        # WORM shard retained; plain + default shards cleaned up.
+        assert worm_stub.deleted == []
+        assert plain_stub.deleted == ["ref-plain-shard"]
+        assert default_stub.deleted == ["ref-unmapped-shard"]
+    finally:
+        db.close()
+
+
+def test_upload_rollback_still_deletes_when_not_worm(tmp_path):
+    """Control: with no backend append-only, every confirmed shard is deleted."""
+    from ghostdrive.pipeline.upload import ChunkUploader
+
+    db = _make_db(tmp_path, "worm_rollback_control.db")
+    try:
+        plain_id = str(uuid.uuid4())
+        _seed_backend(db, plain_id, append_only=0)
+
+        plain_stub = _RecordingBackend()
+        uploader = ChunkUploader(
+            db=db,
+            backend=plain_stub,
+            master_key=os.urandom(32),
+            hkdf_salt=os.urandom(16),
+            nonce_manager=None,
+            active_backends={plain_id: plain_stub},
+        )
+        asyncio.run(
+            uploader._delete_confirmed_sub_blocks([(0, "ref-a", plain_id)])
+        )
+        assert plain_stub.deleted == ["ref-a"]
+    finally:
+        db.close()

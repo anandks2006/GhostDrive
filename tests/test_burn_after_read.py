@@ -250,3 +250,53 @@ def test_burn_envelope_service_refuses_second_serve(client):
     # Idempotent: burning again reports already_burned, storage untouched.
     again = asyncio.run(sharing_service.burn_envelope(token))
     assert again["already_burned"] is True
+
+
+def test_burn_on_worm_backend_retains_bytes_but_tombstones(client):
+    """A burn link hosted on a WORM (append-only) backend: the ciphertext is
+    RETAINED (the backend's contract forbids deletion) but the link is still
+    tombstoned and answers 410, so it can never be fetched again through the
+    app. WORM wins the bytes; burn still wins the access."""
+    file_id = _seed(client, b"worm refuses to shred")
+    res = client.post(
+        "/api/sharing/envelope",
+        json={"file_id": file_id, "burn_after_read": True},
+    )
+    assert res.status_code == 200, res.text
+    token = res.json()["token"]
+
+    meta = _envelope_meta(token)
+    backend_id = meta["backend_id"]
+    reference_id = meta["reference_id"]
+
+    # Flag the hosting backend append-only, then burn via the first fetch.
+    db = state.db
+    with db.transaction():
+        db._conn.execute(
+            "UPDATE backends SET append_only = 1 WHERE id = ?", (backend_id,)
+        )
+    try:
+        blob = client.get(f"/api/public/envelope/{token}/blob")
+        assert blob.status_code == 200, blob.text
+        assert blob.content.startswith(MAGIC)
+
+        # Link is burned/revoked even though the bytes were kept.
+        meta = _envelope_meta(token)
+        assert meta["burned"] is True
+        assert meta["destroyed"] is False  # WORM refused the shred
+        assert meta["worm_retained"] is True
+        assert db.get_share_link(token)["revoked"] == 1
+
+        # Later access is still 410: access is gone even though bytes remain.
+        later = client.get(f"/api/public/envelope/{token}")
+        assert later.status_code == 410
+        assert "burned" in later.json()["detail"].lower()
+
+        # The ciphertext is genuinely retained on the WORM backend.
+        retained = _try_backend_download(backend_id, reference_id)
+        assert retained.startswith(MAGIC)
+    finally:
+        with db.transaction():
+            db._conn.execute(
+                "UPDATE backends SET append_only = 0 WHERE id = ?", (backend_id,)
+            )
